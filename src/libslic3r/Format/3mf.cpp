@@ -900,6 +900,8 @@ ModelVolumeType type_from_string(const std::string &s)
                 for (const Metadata& metadata : obj_metadata->second.metadata) {
                     if (metadata.key == "name")
                         model_object->name = metadata.value;
+                    else if (metadata.key == "link_group_id")  // TEMPORAL LINK
+                        model_object->link_group_id = std::stoi(metadata.value);
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -2043,7 +2045,8 @@ ModelVolumeType type_from_string(const std::string &s)
             "source_offset_y",
             "source_offset_z",
             "extruder",
-            "modifier"
+            "modifier",
+            "link_group_id"   // TEMPORAL LINK
         };
 
         auto itor = std::find(valid_keys.begin(), valid_keys.end(), key);
@@ -3102,6 +3105,10 @@ ModelVolumeType type_from_string(const std::string &s)
                 // stores object's name
                 if (!obj->name.empty())
                     stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"name\" " << VALUE_ATTR << "=\"" << xml_escape(obj->name) << "\"/>\n";
+
+                // TEMPORAL LINK: persist link group so it survives save/load
+                if (obj->link_group_id > 0)
+                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"link_group_id\" " << VALUE_ATTR << "=\"" << obj->link_group_id << "\"/>\n";
 
                 // stores object's config data
                 for (const std::string& key : obj->config.keys()) {
