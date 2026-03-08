@@ -1333,7 +1333,14 @@ void PrintObject::detect_surfaces_type()
                 else if (m_config.support_type.value == stTreeAuto) {
                     bottom_is_fully_supported &= (m_config.support_interface_top_layers.value > 0 && m_config.max_bridge_length.value == 0 && m_config.support_critical_regions_only.value==false);
                 }
-                SurfaceType surface_type_bottom_other = bottom_is_fully_supported ? stBottom : stBottomBridge;
+                // ORCA: If external bridges are disabled, treat overhang areas as top surface
+                // instead of bridge, so they are filled using top surface settings (speed, flow, pattern).
+                const bool ext_bridge_disabled =
+                    this->printing_region(region_id).config().disable_bridge_infill.value == dbiExternalOnly ||
+                    this->printing_region(region_id).config().disable_bridge_infill.value == dbiAll;
+                SurfaceType surface_type_bottom_other = bottom_is_fully_supported ? stBottom :
+                                                        ext_bridge_disabled        ? stTop    :
+                                                                                     stBottomBridge;
                 for (size_t idx_layer = range.begin(); idx_layer < range.end(); ++ idx_layer) {
                     m_print->throw_if_canceled();
                     // BOOST_LOG_TRIVIAL(trace) << "Detecting solid surfaces for region " << region_id << " and layer " << layer->print_z;
@@ -1508,7 +1515,12 @@ void PrintObject::detect_surfaces_type()
         // === Algorithm only considers stInternal surfaces for re-classification, leaving stTop unaffected =
         // ==================================================================================================
         // Only iterate to the second-to-last layer, since we look at layer i+1.
-        if( (this->config().enable_extra_bridge_layer.value == eblApplyToAll) || (this->config().enable_extra_bridge_layer.value == eblExternalBridgeOnly)){
+        // ORCA: Also skip when external bridges are disabled (stBottomBridge no longer exists for this region).
+        const bool ext_bridge_disabled_region =
+            this->printing_region(region_id).config().disable_bridge_infill.value == dbiExternalOnly ||
+            this->printing_region(region_id).config().disable_bridge_infill.value == dbiAll;
+        if( !ext_bridge_disabled_region &&
+            ((this->config().enable_extra_bridge_layer.value == eblApplyToAll) || (this->config().enable_extra_bridge_layer.value == eblExternalBridgeOnly))){
             const size_t last = (m_layers.empty() ? 0 : m_layers.size() - 1);
             tbb::parallel_for( tbb::blocked_range<size_t>(0, last), [this, region_id](const tbb::blocked_range<size_t> &range) {
                 for (size_t i = range.begin(); i < range.end(); ++i) {
@@ -2998,9 +3010,10 @@ void PrintObject::bridge_over_infill()
                     for (const CandidateSurface &cs : surfaces_by_layer.at(lidx)) {
                         for (const Surface *surface : internal_solids) {
                             if (cs.original_surface == surface) {
+                                // ORCA: Internal bridge areas are treated as normal sparse infill.
                                 Surface tmp{*surface, {}};
-                                tmp.surface_type = stInternalBridge;
-                                tmp.bridge_angle = cs.bridge_angle;
+                                tmp.surface_type = stInternal;
+                                tmp.bridge_angle = -1;
                                 for (const ExPolygon &ep : union_ex(cs.new_polys)) {
                                     new_surfaces.emplace_back(tmp, ep);
                                 }
@@ -3033,138 +3046,10 @@ void PrintObject::bridge_over_infill()
     });
     
     // ======================================================================================================================================
-    // === ORCA: Create a second internal bridge layer above the first bridge layer. ========================================================
+    // === ORCA: Second internal bridge layer - disabled: internal bridges are now treated as normal sparse infill. ========================
     // ======================================================================================================================================
     if ( this->m_config.enable_extra_bridge_layer == eblApplyToAll || this->m_config.enable_extra_bridge_layer == eblInternalBridgeOnly) {
-        // Process layers in parallel up to second-to-last
-        tbb::parallel_for( tbb::blocked_range<size_t>(0, this->layers().size() - 1), [this](const tbb::blocked_range<size_t>& r) {
-            for (size_t lidx = r.begin(); lidx < r.end(); ++lidx)
-            {
-                Layer* layer = this->get_layer(lidx);
-                
-                // (A) Gather internal bridging surfaces in the current layer
-                ExPolygons bridging_current_layer;
-                double bridging_angle_current = 0.0;
-                
-                bool found_any_bridge = false;
-                float offset_distance = 0.0f;
-                
-                // Pick a region from which to retrieve the flow width
-                if (!layer->regions().empty())
-                    offset_distance = layer->regions().front()->flow(frSolidInfill).scaled_width();
-                
-                for (LayerRegion *region : layer->regions()) {
-                    for (const Surface &surf : region->fill_surfaces.surfaces) {
-                        if (surf.surface_type == stInternalBridge) {
-                            bridging_current_layer.push_back(surf.expolygon);
-                            bridging_angle_current = surf.bridge_angle; // Store the last bridging angle of the current print object
-                            found_any_bridge = true;
-                        }
-                    }
-                }
-                
-                // If no bridging in this layer, continue with the next
-                if (!found_any_bridge || bridging_current_layer.empty())
-                    continue;
-                
-                // (B) Shrink-expand to remove trivial bridging areas
-                bridging_current_layer = offset_ex( shrink_ex(bridging_current_layer, offset_distance), offset_distance );
-                
-                if (bridging_current_layer.empty())
-                    continue;  // all bridging was trivial, continue with the next layer
-                
-                // (C) If there is a next layer, identify overlapping stInternal & stInternalSolid areas and convert the overlap to stSecondInternalBridge
-                if (lidx + 1 < this->layers().size()) {
-                    Layer* next_layer = this->get_layer(lidx + 1);
-                    
-                    // second bridging angle is 90 degrees offset
-                    double bridging_angle_second = bridging_angle_current + M_PI / 2.0;
-                    
-                    // Union the bridging polygons
-                    ExPolygons bridging_union = union_safety_offset_ex(bridging_current_layer);
-                    
-                    for (LayerRegion *next_region : next_layer->regions()) {
-                        Surfaces next_new_surfaces;
-                        Surfaces keep_surfaces;
-                        
-                        // 1) Do not modify (keep) anything that isn't stInternal or stInternalSolid
-                        for (const Surface &s : next_region->fill_surfaces.surfaces) {
-                            if ( (s.surface_type != stInternal) &&  (s.surface_type != stInternalSolid)) {
-                                keep_surfaces.push_back(s);
-                            }
-                        }
-                        
-                        // 2) For stInternal & stInternalSolid surfaces, check if they overlap bridging_union
-                        // 2a) Gather the next internal stInternalSolid surfaces first
-                        SurfacesPtr next_internals = next_region->fill_surfaces.filter_by_types({ stInternal, stInternalSolid });
-                        
-                        // 2b) For every collected next stInternalSolid surface
-                        for (const Surface *s : next_internals) {
-                            // Intersect it with the current layer bridging polygons
-                            ExPolygons overlap = intersection_ex( s->expolygon, bridging_union, ApplySafetyOffset::Yes );
-                            
-                            // Shrink + expand to remove trivial polygons
-                            overlap = offset_ex(shrink_ex(overlap, offset_distance), offset_distance);
-                            
-                            // Overlapping portion found -> this will become the second internal bridge
-                            if (!overlap.empty()) {
-                                // Create second bridge surface
-                                Surface tmp{*s, {}};
-                                tmp.surface_type = stSecondInternalBridge;
-                                tmp.bridge_angle = bridging_angle_second;
-                                
-                                // Insert bridging polygons
-                                for (const ExPolygon &ep : overlap) {
-                                    next_new_surfaces.emplace_back(tmp, ep);
-                                }
-                                
-                                // Calculate leftover polygons = s->expolygon - bridging_union
-                                ExPolygons leftover = diff_ex(s->expolygon, bridging_union, ApplySafetyOffset::Yes);
-                                // Shrink + expand to remove trivial polygons
-                                leftover = offset_ex(shrink_ex(leftover, offset_distance), offset_distance);
-                                
-                                // Leftover polygons exist. Add them to the new surface maintaining their original attributes
-                                if (!leftover.empty()) {
-                                    ExPolygons unified_leftover = union_safety_offset_ex(leftover);
-                                    for (const ExPolygon &ep : unified_leftover) {
-                                        // keep same type / angle as original
-                                        Surface leftover_surf{*s, {}};
-                                        leftover_surf.surface_type = s->surface_type;
-                                        leftover_surf.bridge_angle = s->bridge_angle;
-                                        next_new_surfaces.emplace_back(leftover_surf, ep);
-                                    }
-                                }
-                            }
-                            else { // No overlapping portion found
-                                // keep the surface intact
-                                keep_surfaces.push_back(*s);
-                            }
-                        }
-                        
-                        // 3) Rebuild next_region surfaces
-                        next_region->fill_surfaces.surfaces.clear();
-                        next_region->fill_surfaces.append(keep_surfaces);
-                        next_region->fill_surfaces.append(next_new_surfaces);
-                    } // end for next_layer->regions
-                } // end if next layer
-            }
-        }); // end parallel_for
-        
-        // =================================================================================================================
-        // === ORCA: Interim workaround - for now the new stSecondInternalBridge surfaces are re-classified  ===============
-        // === back to an internal bridge. As a starting point, this improves bridging reliability as it extrudes ==========
-        // === two external bridge layers. However, TODO: Implement a new surface type throughout the codebase =============
-        // =================================================================================================================
-        for (size_t lidx = 0; lidx < this->layers().size(); ++lidx) {
-            Layer* layer = this->get_layer(lidx);
-            for (LayerRegion* region : layer->regions()) {
-                for (Surface &surf : region->fill_surfaces.surfaces) {
-                    if (surf.surface_type == stSecondInternalBridge) {
-                        surf.surface_type = stInternalBridge;
-                    }
-                }
-            }
-        }
+        // No-op: stInternalBridge surfaces no longer exist; they are classified as stInternal (sparse infill).
     }
     // ===========================================================================================
     // === ORCA: End of second bridging pass =====================================================

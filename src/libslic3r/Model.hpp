@@ -396,6 +396,9 @@ public:
     // BBS: save for compare with new load volumes
     std::vector<ObjectID>   volume_ids;
 
+    // TEMPORAL LINK: 0 = not linked; >0 = shared movement group id
+    int                     link_group_id { 0 };
+
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
@@ -683,7 +686,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, link_group_id); // TEMPORAL LINK
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -696,7 +699,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, link_group_id); // TEMPORAL LINK
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)

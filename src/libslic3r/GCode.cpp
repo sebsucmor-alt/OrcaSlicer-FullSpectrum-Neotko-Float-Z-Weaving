@@ -1221,12 +1221,12 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
 
         // Check that there are extrusions on the very first layer. The case with empty
         // first layer may result in skirt/brim in the air and maybe other issues.
-        if (layers_to_print.size() == 1u) {
-            if (!has_extrusions)
-                throw Slic3r::SlicingError(
-                    _(L("One object has empty initial layer and can't be printed. Please Cut the bottom or enable supports.")),
-                    object.id().id);
-        }
+  // COMMENT      if (layers_to_print.size() == 1u) {
+  // COMMENT          if (!has_extrusions)
+  // COMMENT              throw Slic3r::SlicingError(
+  // COMMENT                  _(L("One object has empty initial layer and can't be printed. Please Cut the bottom or enable supports.")),
+  // COMMENT                  object.id().id);
+  // COMMENT      }
 
         // In case there are extrusions on this layer, check there is a layer to lay it on.
         if ((layer_to_print.object_layer && layer_to_print.object_layer->has_extrusions())
@@ -6451,10 +6451,12 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     _mm3_per_mm *= filament_flow_ratio;
     if (path.role() == erTopSolidInfill)
         _mm3_per_mm *= m_config.top_solid_infill_flow_ratio;
+    else if (path.role() == erInternalBridgeInfill &&
+             (m_config.disable_bridge_infill == dbiInternalOnly || m_config.disable_bridge_infill == dbiAll))
+        // Treat internal bridge as top surface: apply top surface flow ratio instead of bridge flow
+        _mm3_per_mm *= m_config.top_solid_infill_flow_ratio;
     else if (path.role() == erBottomSurface)
         _mm3_per_mm *= m_config.bottom_solid_infill_flow_ratio;
-    else if (path.role() == erInternalBridgeInfill)
-        _mm3_per_mm *= m_config.internal_bridge_flow;
     else if (sloped)
         _mm3_per_mm *= m_config.scarf_joint_flow_ratio;
     // Effective extrusion length per distance unit = (filament_flow_ratio/cross_section) * mm3_per_mm / print flow ratio
@@ -6474,12 +6476,16 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             if (sloped) {
                 speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(m_config.get_abs_value("outer_wall_speed")));
             }
-        } else if (path.role() == erInternalBridgeInfill) {
-            speed = m_config.get_abs_value("internal_bridge_speed");
         } else if (path.role() == erOverhangPerimeter || path.role() == erSupportTransition || path.role() == erBridgeInfill) {
             speed = m_config.get_abs_value("bridge_speed");
-        } else if (path.role() == erInternalInfill) {
+        } else if (path.role() == erInternalInfill ||
+                   (path.role() == erInternalBridgeInfill &&
+                    m_config.disable_bridge_infill != dbiInternalOnly &&
+                    m_config.disable_bridge_infill != dbiAll)) {
             speed = m_config.get_abs_value("sparse_infill_speed");
+        } else if (path.role() == erInternalBridgeInfill) {
+            // Internal bridge disabled (dbiInternalOnly or dbiAll): use top surface speed
+            speed = m_config.get_abs_value("top_surface_speed");
         } else if (path.role() == erSolidInfill) {
             speed = m_config.get_abs_value("internal_solid_infill_speed");
         } else if (path.role() == erTopSolidInfill) {
@@ -6747,6 +6753,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     //    { "50%", Overhang_threshold_3_4 },
     //    { "75%", Overhang_threshold_4_4 },
     //    { "95%", Overhang_threshold_bridge }
+    // Pre-compute disable flag for internal bridge fan suppression
+    const bool int_bridge_as_top = (m_config.disable_bridge_infill == dbiInternalOnly || m_config.disable_bridge_infill == dbiAll);
+
     auto check_overhang_fan = [&overhang_fan_threshold](float overlap, ExtrusionRole role) {
         if (role == erBridgeInfill ||
             role == erOverhangPerimeter) { // ORCA: Split out bridge infill to internal and external to apply separate fan settings
@@ -6854,8 +6863,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                             (path.role() == erBridgeInfill ||
                              path.role() == erOverhangPerimeter)); // ORCA: Add support for separate internal bridge fan speed control
 
-                    // ORCA: Add support for separate internal bridge fan speed control
-                    append_role_based_fan_marker(erInternalBridgeInfill, "_INTERNAL_BRIDGE"sv, path.role() == erInternalBridgeInfill);
+                    // ORCA: internal bridge fan marker removed - treated as sparse infill
                 }
 
                 apply_role_based_fan_speed();
@@ -6865,6 +6873,55 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr) {
                 double path_length  = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
+
+                // ── Neotko Interlayer Sanding ─────────────────────────────────────────────
+                // For erTopSolidInfill paths, subdivide every line into micro-segments and
+                // add a triangular-wave Z oscillation so adjacent passes interleave.
+                const bool sanding_active = m_config.interlayer_sanding_enabled.value
+                                            && path.role() == erTopSolidInfill
+                                            && sloped == nullptr;
+
+                // Neotko Infill Interlayer Sanding — independent params for sparse infill only.
+                // Perimeters (erPerimeter, erExternalPerimeter) and solid infill are never affected.
+                const bool infill_sanding_active = m_config.infill_sanding_enabled.value
+                                                   && path.role() == erInternalInfill
+                                                   && sloped == nullptr;
+
+                // Select which parameter set is in use for this path
+                const bool any_sanding = sanding_active || infill_sanding_active;
+
+                // Resolve period: 0 → auto = line width of this path
+                double sanding_period = sanding_active
+                    ? m_config.interlayer_sanding_period.value
+                    : m_config.infill_sanding_period.value;
+                if (any_sanding && sanding_period < EPSILON) {
+                    sanding_period = unscale<double>(path.width);
+                    if (sanding_period < EPSILON)
+                        sanding_period = 0.4;
+                }
+                const double sanding_amplitude = sanding_active
+                    ? m_config.interlayer_sanding_amplitude.value
+                    : m_config.infill_sanding_amplitude.value;
+                const double sanding_max_z_speed = sanding_active
+                    ? m_config.interlayer_sanding_max_z_speed.value
+                    : m_config.infill_sanding_max_z_speed.value;
+
+                // Triangular wave: max |dZ/dX| = 4*amplitude/period
+                // Cap XY speed so dZ/dt = |dZ/dX| * XY_speed <= max_z_speed
+                // => XY_speed_max = max_z_speed * period / (4 * amplitude)
+                double sanding_F = F; // mm/min, will be capped if needed
+                if (any_sanding && sanding_amplitude > EPSILON && sanding_period > EPSILON) {
+                    const double xy_speed_max = sanding_max_z_speed * sanding_period / (4.0 * sanding_amplitude); // mm/s
+                    const double xy_F_max     = xy_speed_max * 60.0; // mm/min
+                    sanding_F = std::min(F, xy_F_max);
+                    if (std::abs(sanding_F - F) > EPSILON)
+                        gcode += m_writer.set_speed(sanding_F, "", comment);
+                }
+
+                // Tracks cumulative path distance for phase calculation (resets per extrude call)
+                double sanding_dist = 0.0;
+                // ── End sanding preamble ──────────────────────────────────────────────────
+
                 for (const Line& line : path.polyline.lines()) {
                     std::string  tempDescription = description;
                     const double line_length     = line.length() * SCALING_FACTOR;
@@ -6881,12 +6938,51 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                         }
                     }
                     if (sloped == nullptr) {
-                        // Normal extrusion
-                        gcode += m_writer.extrude_to_xy(this->point_to_gcode(line.b), dE,
-                                                        GCodeWriter::full_gcode_comment ? tempDescription : "",
-                                                        path.is_force_no_extrusion());
+                        if (any_sanding && sanding_amplitude > EPSILON && sanding_period > EPSILON) {
+                            // Subdivide this line into micro-segments for Z oscillation.
+                            // Use at least 8 sub-segments per period for a smooth wave.
+                            // Works for both erTopSolidInfill (sanding_active) and
+                            // erInternalInfill (infill_sanding_active) — same algorithm,
+                            // independent parameter sets resolved in the preamble above.
+                            const int    n_per_period = 8;
+                            const double seg_target   = sanding_period / double(n_per_period);
+                            const int    n_segs       = std::max(1, (int)std::ceil(line_length / seg_target));
+                            const double seg_len      = line_length / double(n_segs);
+                            const double dE_per_seg   = dE / double(n_segs);
+
+                            // Line start/end in gcode coordinates
+                            const Vec2d pt_a = this->point_to_gcode(line.a);
+                            const Vec2d pt_b = this->point_to_gcode(line.b);
+
+                            for (int si = 0; si < n_segs; ++si) {
+                                const double t = double(si + 1) / double(n_segs);
+                                const Vec2d  pt(pt_a + t * (pt_b - pt_a));
+
+                                // Triangular wave — phase 0..1 over one period
+                                // wave goes: 0 → +amp (at period/4) → 0 (at period/2)
+                                //            → -amp (at 3*period/4) → 0 (at period)
+                                const double d     = sanding_dist + seg_len * double(si + 1);
+                                double       phase = std::fmod(d / sanding_period, 1.0) * 4.0; // 0..4
+                                double       z_off;
+                                if      (phase < 1.0) z_off =  sanding_amplitude * phase;
+                                else if (phase < 3.0) z_off =  sanding_amplitude * (2.0 - phase);
+                                else                  z_off =  sanding_amplitude * (phase - 4.0);
+
+                                const Vec3d dest3d(pt(0), pt(1), m_nominal_z + z_off);
+                                gcode += m_writer.extrude_to_xyz(dest3d, dE_per_seg,
+                                                                 GCodeWriter::full_gcode_comment ? tempDescription : "",
+                                                                 path.is_force_no_extrusion());
+                            }
+                            sanding_dist += line_length;
+
+                        } else {
+                            // Normal extrusion (no sanding)
+                            gcode += m_writer.extrude_to_xy(this->point_to_gcode(line.b), dE,
+                                                            GCodeWriter::full_gcode_comment ? tempDescription : "",
+                                                            path.is_force_no_extrusion());
+                        }
                     } else {
-                        // Sloped extrusion
+                        // Sloped extrusion — sanding never combined with slope
                         const auto [z_ratio, e_ratio] = sloped->interpolate(path_length / total_length);
                         Vec2d dest2d                  = this->point_to_gcode(line.b);
                         Vec3d dest3d(dest2d(0), dest2d(1), get_sloped_z(z_ratio));
@@ -6894,6 +6990,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                                                          path.is_force_no_extrusion());
                     }
                 }
+
+                // ── Neotko Sanding: restore Z and speed after any sanding path ─────────
+                if (any_sanding && sanding_amplitude > EPSILON) {
+                    // Return nozzle to the layer's nominal Z
+                    gcode += m_writer.travel_to_z(m_nominal_z,
+                        sanding_active ? "Neotko sanding: restore layer Z"
+                                       : "Neotko infill sanding: restore layer Z");
+                    // Restore original XY speed if it was capped
+                    if (std::abs(sanding_F - F) > EPSILON)
+                        gcode += m_writer.set_speed(F, "", comment);
+                }
+                // ─────────────────────────────────────────────────────────────────────────
             } else {
                 // BBS: start to generate gcode from arc fitting data which includes line and arc
                 const std::vector<PathFittingData>& fitting_result = path.polyline.fitting_result;
@@ -6973,9 +7081,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         if (m_enable_cooling_markers && enable_overhang_bridge_fan)
             pre_fan_enabled = check_overhang_fan(new_points[0].overlap, path.role());
 
-        if (path.role() == erInternalBridgeInfill) // ORCA: Add support for separate internal bridge fan speed control
-            pre_fan_enabled = true;
-
+        // erInternalBridgeInfill treated as sparse infill - no special fan pre-enable.
         double path_length = 0.;
         for (size_t i = 1; i < new_points.size(); i++) {
             std::string           tempDescription     = description;
@@ -6988,8 +7094,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     append_role_based_fan_marker(erOverhangPerimeter, "_OVERHANG"sv, pre_fan_enabled && cur_fan_enabled);
                     pre_fan_enabled = cur_fan_enabled;
 
-                    // ORCA: Add support for separate internal bridge fan speed control
-                    append_role_based_fan_marker(erInternalBridgeInfill, "_INTERNAL_BRIDGE"sv, path.role() == erInternalBridgeInfill);
+                    // ORCA: internal bridge fan marker removed - treated as sparse infill
                 }
 
                 apply_role_based_fan_speed();
@@ -7094,8 +7199,8 @@ std::string GCode::extrusion_role_to_string_for_parser(const ExtrusionRole& role
     case erSolidInfill: return "SolidInfill";
     case erTopSolidInfill: return "TopSolidInfill";
     case erBottomSurface: return "BottomSurface";
-    case erBridgeInfill:
-    case erInternalBridgeInfill: return "BridgeInfill";
+    case erBridgeInfill: return "BridgeInfill";
+    case erInternalBridgeInfill: return "InternalInfill"; // treated as sparse infill
     case erGapFill: return "GapFill";
     case erIroning: return "Ironing";
     case erSkirt: return "Skirt";

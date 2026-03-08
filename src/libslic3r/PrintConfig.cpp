@@ -311,6 +311,15 @@ static t_config_enum_values s_keys_map_EnableExtraBridgeLayer {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(EnableExtraBridgeLayer)
 
 // Orca
+static t_config_enum_values s_keys_map_DisableBridgeInfill {
+    { "disabled",        dbiDisabled },
+    { "external_only",   dbiExternalOnly },
+    { "internal_only",   dbiInternalOnly },
+    { "all",             dbiAll },
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(DisableBridgeInfill)
+
+// Orca
 static t_config_enum_values s_keys_map_GapFillTarget {
     { "everywhere",        gftEverywhere },
     { "topbottom",        gftTopBottom },
@@ -1565,6 +1574,30 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("No filtering"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<InternalBridgeFilter>(ibfDisabled));
+
+
+    def = this->add("disable_bridge_infill", coEnum);
+    def->label = L("Disable bridge infill");
+    def->category = L("Quality");
+    def->tooltip = L("When enabled, bridge infill areas are printed using top surface infill settings "
+                     "(speed, flow and fan) instead of dedicated bridge settings. "
+                     "This lets you fully control bridge areas via the top surface parameters.\n\n"
+                     "Options:\n"
+                     "1. Disabled - standard bridge behaviour (default)\n"
+                     "2. External bridges only - external bridges (over air or support) use top surface settings\n"
+                     "3. Internal bridges only - internal bridges (over sparse infill) use top surface settings\n"
+                     "4. All bridges - both internal and external bridges use top surface settings");
+    def->enum_keys_map = &ConfigOptionEnum<DisableBridgeInfill>::get_enum_values();
+    def->enum_values.push_back("disabled");
+    def->enum_values.push_back("external_only");
+    def->enum_values.push_back("internal_only");
+    def->enum_values.push_back("all");
+    def->enum_labels.push_back(L("Disabled"));
+    def->enum_labels.push_back(L("External bridges only"));
+    def->enum_labels.push_back(L("Internal bridges only"));
+    def->enum_labels.push_back(L("All bridges"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<DisableBridgeInfill>(dbiDisabled));
 
 
     def = this->add("max_bridge_length", coFloat);
@@ -5713,6 +5746,118 @@ void PrintConfigDef::init_fff_params()
     def->min = 1;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(100));
+
+    // Neotko Interlayer Sanding
+    def = this->add("interlayer_sanding_enabled", coBool);
+    def->label = L("Enable Neotko Interlayer Sanding");
+    def->category = L("Quality");
+    def->tooltip = L("Oscillates the nozzle in Z while printing top surface infill lines, creating an "
+                     "interlaced pattern that mechanically bonds adjacent passes. This improves top "
+                     "surface finish and adhesion between shell layers.\n\n"
+                     "The nozzle rises and falls by the configured amplitude once per period, "
+                     "interleaving with the adjacent line on the return pass.\n\n"
+                     "NOTE: Requires a printer with a fast Z axis (CoreXZ, CoreXZY, or equivalent). "
+                     "On slow Z-axis printers the XY speed will be automatically capped.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("interlayer_sanding_amplitude", coFloat);
+    def->label = L("Sanding Z amplitude");
+    def->category = L("Quality");
+    def->tooltip = L("How far the nozzle moves up and down in Z during each oscillation cycle. "
+                     "Typical values are 0.05–0.2 mm. Values larger than half the layer height "
+                     "will cause the nozzle to dip into the previous layer, which maximises "
+                     "interlayer bonding but requires a well-tuned pressure advance.\n\n"
+                     "The XY speed is automatically capped so that the Z motor is never asked to "
+                     "move faster than the Max Z speed setting.");
+    def->sidetext = "mm";
+    def->min = 0.01;
+    def->max = 2.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def = this->add("interlayer_sanding_period", coFloat);
+    def->label = L("Sanding oscillation period");
+    def->category = L("Quality");
+    def->tooltip = L("Distance along the extrusion path for one complete Z oscillation cycle (up and back down). "
+                     "Setting this to 0 uses the top surface line width automatically, which produces exactly "
+                     "one cycle per line spacing — ideal for the interlace effect. Larger values produce "
+                     "gentler, wider waves.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 20.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("interlayer_sanding_max_z_speed", coFloat);
+    def->label = L("Max Z speed for sanding");
+    def->category = L("Quality");
+    def->tooltip = L("Maximum speed at which the Z axis moves during interlayer sanding oscillations. "
+                     "The XY print speed is automatically reduced so that this limit is never exceeded, "
+                     "preventing missed steps or artefacts on machines with a slower Z motor.\n\n"
+                     "Set this to match your printer's maximum reliable Z speed. On Klipper machines "
+                     "with INPUT_SHAPER, Klipper itself may further limit the Z rate; this setting "
+                     "ensures the slicer already stays within a safe envelope.");
+    def->sidetext = "mm/s";
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(20.));
+
+    // Neotko Infill Interlayer Sanding
+    def = this->add("infill_sanding_enabled", coBool);
+    def->label = L("Enable Neotko Infill Interlayer Sanding");
+    def->category = L("Strength");
+    def->tooltip = L("Oscillates the nozzle in Z while printing sparse infill lines. "
+                     "This increases the mechanical interlayer bond of the infill structure "
+                     "by interleaving adjacent passes vertically, improving part strength in Z "
+                     "without changing density or pattern.\n\n"
+                     "Only affects erInternalInfill paths (sparse infill). "
+                     "Perimeters (inner and outer walls) and solid infill are never affected.\n\n"
+                     "NOTE: Requires a printer with a fast Z axis (CoreXZ, CoreXZY, or equivalent). "
+                     "On slow Z-axis printers the XY speed will be automatically capped.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("infill_sanding_amplitude", coFloat);
+    def->label = L("Infill sanding Z amplitude");
+    def->category = L("Strength");
+    def->tooltip = L("How far the nozzle moves up and down in Z during each infill oscillation cycle. "
+                     "Typical values are 0.05–0.3 mm. Values larger than half the layer height "
+                     "cause the nozzle to dip into the previous layer, maximising interlayer bonding. "
+                     "The XY speed is automatically capped to the Max Z speed setting.");
+    def->sidetext = "mm";
+    def->min = 0.01;
+    def->max = 2.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def = this->add("infill_sanding_period", coFloat);
+    def->label = L("Infill sanding oscillation period");
+    def->category = L("Strength");
+    def->tooltip = L("Distance along the infill path for one complete Z oscillation cycle. "
+                     "Setting this to 0 uses the sparse infill line width automatically, "
+                     "producing one cycle per line spacing — ideal for the interlace effect. "
+                     "Larger values produce gentler, wider waves.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 20.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("infill_sanding_max_z_speed", coFloat);
+    def->label = L("Max Z speed for infill sanding");
+    def->category = L("Strength");
+    def->tooltip = L("Maximum speed at which the Z axis moves during infill sanding oscillations. "
+                     "The XY sparse infill speed is automatically reduced to stay within this limit, "
+                     "preventing missed steps on machines with a slower Z motor.\n\n"
+                     "On Klipper machines, max_z_velocity in printer.cfg provides an additional "
+                     "hardware-level safety net.");
+    def->sidetext = "mm/s";
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(20.));
 
     def = this->add("top_shell_layers", coInt);
     def->label = L("Top shell layers");

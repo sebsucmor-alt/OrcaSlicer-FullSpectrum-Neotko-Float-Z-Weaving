@@ -206,6 +206,11 @@ enum EnableExtraBridgeLayer {
 };
 
 //Orca
+enum DisableBridgeInfill {
+    dbiDisabled, dbiExternalOnly, dbiInternalOnly, dbiAll
+};
+
+//Orca
 enum GapFillTarget {
      gftEverywhere, gftTopBottom, gftNowhere
  };
@@ -972,6 +977,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                internal_bridge_flow))
     ((ConfigOptionFloat,                bridge_speed))
     ((ConfigOptionFloatOrPercent,       internal_bridge_speed))
+    ((ConfigOptionEnum<DisableBridgeInfill>, disable_bridge_infill))
     ((ConfigOptionEnum<EnsureVerticalShellThickness>,   ensure_vertical_shell_thickness))
     ((ConfigOptionPercent,              top_surface_density))
     ((ConfigOptionPercent,               bottom_surface_density))
@@ -1045,6 +1051,16 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
     ((ConfigOptionFloat, top_surface_speed))
+    // Neotko Interlayer Sanding
+    ((ConfigOptionBool,  interlayer_sanding_enabled))
+    ((ConfigOptionFloat, interlayer_sanding_amplitude))
+    ((ConfigOptionFloat, interlayer_sanding_period))
+    ((ConfigOptionFloat, interlayer_sanding_max_z_speed))
+    // Neotko Infill Interlayer Sanding
+    ((ConfigOptionBool,  infill_sanding_enabled))
+    ((ConfigOptionFloat, infill_sanding_amplitude))
+    ((ConfigOptionFloat, infill_sanding_period))
+    ((ConfigOptionFloat, infill_sanding_max_z_speed))
     //BBS
     ((ConfigOptionBool,                 enable_overhang_speed))
     ((ConfigOptionFloatOrPercent,       overhang_1_4_speed))

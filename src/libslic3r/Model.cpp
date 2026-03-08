@@ -1111,6 +1111,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     //BBS: add module name
     this->module_name                 = rhs.module_name;
     this->input_file                  = rhs.input_file;
+    this->link_group_id               = rhs.link_group_id;  // TEMPORAL LINK
     // Copies the config's ID
     this->config                      = rhs.config;
     assert(this->config.id() == rhs.config.id());
@@ -1151,6 +1152,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     //BBS: add module name
     this->module_name                 = std::move(rhs.module_name);
     this->input_file                  = std::move(rhs.input_file);
+    this->link_group_id               = rhs.link_group_id;  // TEMPORAL LINK (int, no move needed)
     // Moves the config's ID
     this->config                      = std::move(rhs.config);
     assert(this->config.id() == rhs.config.id());
@@ -1689,7 +1691,9 @@ void ModelObject::center_around_origin(bool include_modifiers)
 
 void ModelObject::ensure_on_bed(bool allow_negative_z)
 {
-    double z_offset = 0.0;
+	return; // Disabled: do not auto-move objects to Z0
+    	double z_offset = 0.0;
+	// ... resto del código sin tocar
 
     if (allow_negative_z) {
         if (parts_count() == 1) {
