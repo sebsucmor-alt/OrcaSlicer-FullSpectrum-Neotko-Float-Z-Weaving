@@ -8200,13 +8200,22 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
     // BBS: find an empty cell to put the copied object
     for (auto& instance : new_instances) {
         auto offset = instance->get_offset();
-        // ORCA: if the object had a meaningful XY position in the file (more than 0.5 mm
-        // from origin), keep it — the user placed it intentionally in CAD.
-        // Objects sitting at the file origin (common for casual STL exports) still get
-        // auto-placed at bed centre or the nearest empty cell.
-        const bool has_file_position = (std::abs(offset(0)) > 0.5 || std::abs(offset(1)) > 0.5);
-        if (has_file_position)
-            continue; // keep XY from file, only Z was already set correctly above
+        // ORCA FullSpectrum: always preserve the XY position from the file.
+        // This makes single-file loads consistent with multi-file "Load as single
+        // object with multiple parts" loads — in both cases the file's world-space
+        // coordinates are respected without auto-centering.
+        // Previously a 0.5 mm threshold was used to decide, but that caused assembly
+        // parts whose individual bounding-box center is near origin to be wrongly
+        // moved to bed centre when loaded one by one.
+        // The only auto-placement we still allow is when the plate is completely
+        // empty AND the object has NO meaningful position (both X and Y are exactly
+        // zero — i.e. the mesh was exported at the absolute origin with no offset).
+        // This preserves the "drop STL on empty bed → goes to bed centre" UX for
+        // truly origin-less exports while fixing assembly part positioning.
+        const bool has_any_file_position = (offset(0) != 0.0 || offset(1) != 0.0);
+        if (has_any_file_position)
+            continue; // keep XY from file
+        // Origin is exactly (0,0): place at bed centre (single casual STL export).
         auto start_point = this->bed.build_volume().bounding_volume2d().center();
         bool plate_empty = partplate_list.get_curr_plate()->empty();
         Vec3d displacement;
