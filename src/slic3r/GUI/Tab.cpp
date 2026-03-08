@@ -2236,7 +2236,14 @@ void TabPrint::build()
         optgroup->append_single_option_line("thick_internal_bridges", "quality_settings_bridging#thick-bridges");
         optgroup->append_single_option_line("enable_extra_bridge_layer", "quality_settings_bridging#extra-bridge-layers");
         optgroup->append_single_option_line("dont_filter_internal_bridges", "quality_settings_bridging#filter-out-small-internal-bridges");
+        optgroup->append_single_option_line("disable_bridge_infill", "quality_settings_bridging#disable-bridge-infill");
         optgroup->append_single_option_line("counterbore_hole_bridging", "quality_settings_bridging#bridge-counterbore-hole");
+
+        optgroup = page->new_optgroup(L("Neotko Interlayer Sanding"));
+        optgroup->append_single_option_line("interlayer_sanding_enabled");
+        optgroup->append_single_option_line("interlayer_sanding_amplitude");
+        optgroup->append_single_option_line("interlayer_sanding_period");
+        optgroup->append_single_option_line("interlayer_sanding_max_z_speed");
 
         optgroup = page->new_optgroup(L("Overhangs"), L"param_overhang");
         optgroup->append_single_option_line("detect_overhang_wall", "quality_settings_overhangs#detect-overhang-wall");
@@ -2256,9 +2263,11 @@ void TabPrint::build()
 
         optgroup = page->new_optgroup(L("Top/bottom shells"), L"param_shell");
         optgroup->append_single_option_line("top_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
+        optgroup->append_single_option_line("top_surface_density", "strength_settings_wall_and_surfaces#top-surface-density");
         optgroup->append_single_option_line("top_shell_layers");
         optgroup->append_single_option_line("top_shell_thickness");
         optgroup->append_single_option_line("bottom_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
+        optgroup->append_single_option_line("bottom_surface_density", "strength_settings_wall_and_surfaces#bottom-surface-density");
         optgroup->append_single_option_line("bottom_shell_layers");
         optgroup->append_single_option_line("bottom_shell_thickness");
         optgroup->append_single_option_line("top_bottom_infill_wall_overlap");
@@ -2288,6 +2297,12 @@ void TabPrint::build()
         optgroup->append_single_option_line("gap_fill_target", "strength_settings_infill#apply-gap-fill");
         optgroup->append_single_option_line("filter_out_gap_fill", "strength_settings_infill#filter-out-tiny-gaps");
         optgroup->append_single_option_line("infill_wall_overlap", "strength_settings_infill#infill-wall-overlap");
+
+        optgroup = page->new_optgroup(L("Neotko Infill Interlayer Sanding"));
+        optgroup->append_single_option_line("infill_sanding_enabled");
+        optgroup->append_single_option_line("infill_sanding_amplitude");
+        optgroup->append_single_option_line("infill_sanding_period");
+        optgroup->append_single_option_line("infill_sanding_max_z_speed");
 
         optgroup = page->new_optgroup(L("Advanced"), L"param_advanced");
         optgroup->append_single_option_line("align_infill_direction_to_model", "strength_settings_advanced#align-infill-direction-to-model");

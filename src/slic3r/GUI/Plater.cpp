@@ -5665,6 +5665,27 @@ struct Plater::priv
     Preview *preview;
     AssembleView* assemble_view { nullptr };
     bool first_enter_assemble{ true };
+
+    // TEMPORAL LINK ──────────────────────────────────────────────────────────
+    // Maps ModelObject::id().id → link group id (positive integer).
+    // Objects sharing the same group id move together.
+    std::map<size_t, int>  m_link_groups;
+    int                    m_next_link_group_id { 1 };
+    // Last known XYZ offset per object, used to compute movement delta.
+    // Refreshed at drag-start, after every INSTANCE_MOVED sync, and after undo/redo.
+    std::map<size_t, Vec3d> m_pre_move_offsets;
+    // Guards against recursive INSTANCE_MOVED while we propagate a delta.
+    bool                   m_syncing_links { false };
+    // Persistent Z-protection for floating objects.  Something inside
+    // reload_scene() in the Snapmaker fork resets the Z of floating objects to
+    // 0 whenever update() is called.  This map stores the canonical full Vec3d
+    // offset for every object that the user intentionally placed above the bed.
+    // After every update() that involves movement, we restore these positions
+    // synchronously AND via wxCallAfter (async) to survive multi-step resets.
+    // Populated by update_pre_move_snapshot(); updated whenever a deliberate
+    // move is applied; cleared when the object is removed.
+    std::map<size_t, Vec3d> m_floating_z_guard;
+    // ────────────────────────────────────────────────────────────────────────
     std::unique_ptr<NotificationManager> notification_manager;
 
     ProjectDirtyStateManager dirty_state;
@@ -5855,6 +5876,13 @@ struct Plater::priv
     void split_object();
     void split_volume();
     void scale_selection_to_fit_print_volume();
+
+    // TEMPORAL LINK
+    void link_selected_objects();
+    void break_link_selected_objects();
+    void on_instance_moved_with_link_sync();
+    void rebuild_link_groups_from_model();
+    void update_pre_move_snapshot();
 
     // Return the active Undo/Redo stack. It may be either the main stack or the Gimzo stack.
     Slic3r::UndoRedo::Stack& undo_redo_stack() { assert(m_undo_redo_stack_active != nullptr); return *m_undo_redo_stack_active; }
@@ -6377,7 +6405,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         view3D_canvas->Bind(EVT_GLCANVAS_QUESTION_MARK, [](SimpleEvent&) { wxGetApp().keyboard_shortcuts(); });
         view3D_canvas->Bind(EVT_GLCANVAS_INCREASE_INSTANCES, [this](Event<int>& evt)
             { if (evt.data == 1) this->q->increase_instances(); else if (this->can_decrease_instances()) this->q->decrease_instances(); });
-        view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_MOVED, [this](SimpleEvent&) { update(); });
+        view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_MOVED, [this](SimpleEvent&) { on_instance_moved_with_link_sync(); });
         view3D_canvas->Bind(EVT_GLCANVAS_FORCE_UPDATE, [this](SimpleEvent&) { update(); });
         view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_ROTATED, [this](SimpleEvent&) { update(); });
         view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_SCALED, [this](SimpleEvent&) { update(); });
@@ -7862,7 +7890,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
         int model_idx = 0;
         for (ModelObject *model_object : model.objects) {
-            if (!type_3mf && !type_any_amf) model_object->center_around_origin(false);
+            // ORCA: do NOT pre-center non-3mf files here — the original XY/Z position
+            // from the file is captured inside load_model_objects() before centering,
+            // so the object can be restored to its file coordinates on the bed.
+            // if (!type_3mf && !type_any_amf) model_object->center_around_origin(false);
 
             // BBS
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format("import 3mf IMPORT_LOAD_MODEL_OBJECTS \n");
@@ -8079,8 +8110,17 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
 
         if (model_object->instances.empty()) {
 #ifdef AUTOPLACEMENT_ON_LOAD
+            // ORCA: preserve original file coordinates.
+            // Capture the bounding-box centre before center_around_origin() moves the mesh.
+            // After centering, origin_translation holds the inverse shift, so:
+            //   restored XY = orig_bbox.center().xy()
+            //   restored Z  = -origin_translation(2)  (places bottom at original file Z)
+            const BoundingBoxf3 orig_bbox = object->raw_mesh_bounding_box();
+            const Vec3d orig_center = orig_bbox.center();
             object->center_around_origin();
-            new_instances.emplace_back(object->add_instance());
+            ModelInstance* inst = object->add_instance();
+            inst->set_offset(Vec3d(orig_center.x(), orig_center.y(), -object->origin_translation(2)));
+            new_instances.emplace_back(inst);
 #else /* AUTOPLACEMENT_ON_LOAD */
             // if object has no defined position(s) we need to rearrange everything after loading
             // need_arrange = true;
@@ -8160,6 +8200,13 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
     // BBS: find an empty cell to put the copied object
     for (auto& instance : new_instances) {
         auto offset = instance->get_offset();
+        // ORCA: if the object had a meaningful XY position in the file (more than 0.5 mm
+        // from origin), keep it — the user placed it intentionally in CAD.
+        // Objects sitting at the file origin (common for casual STL exports) still get
+        // auto-placed at bed centre or the nearest empty cell.
+        const bool has_file_position = (std::abs(offset(0)) > 0.5 || std::abs(offset(1)) > 0.5);
+        if (has_file_position)
+            continue; // keep XY from file, only Z was already set correctly above
         auto start_point = this->bed.build_volume().bounding_volume2d().center();
         bool plate_empty = partplate_list.get_curr_plate()->empty();
         Vec3d displacement;
@@ -8204,6 +8251,8 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
     object_list_changed();
 
     this->schedule_background_process();
+
+    rebuild_link_groups_from_model(); // TEMPORAL LINK: restore groups from link_group_id fields
 
     return obj_idxs;
 }
@@ -8457,6 +8506,13 @@ void Plater::priv::remove(size_t obj_idx)
         view3D->enable_layers_editing(false);
 
     m_worker.cancel_all();
+    // TEMPORAL LINK: remove deleted object from its link group before model deletion
+    if (obj_idx < model.objects.size()) {
+        ModelObject* obj = model.objects[obj_idx];
+        m_link_groups.erase(obj->id().id);
+        m_pre_move_offsets.erase(obj->id().id);
+        m_floating_z_guard.erase(obj->id().id); // TEMPORAL LINK: clean up guard
+    }
     model.delete_object(obj_idx);
     //BBS: notify partplate the instance removed
     partplate_list.notify_instance_removed(obj_idx, -1);
@@ -8709,6 +8765,320 @@ void Plater::priv::scale_selection_to_fit_print_volume()
     this->view3D->get_canvas3d()->get_selection().scale_to_fit_print_volume(*config);
 #endif // ENABLE_ENHANCED_PRINT_VOLUME_FIT
 }
+
+// ─── TEMPORAL LINK ────────────────────────────────────────────────────────────
+
+// Capture the current XYZ offset of every object instance so we can compute
+// movement deltas when INSTANCE_MOVED fires (covers both mouse drag and sidebar).
+// Also refreshes m_floating_z_guard: records the canonical position of any
+// object whose bottom face is above the bed (min_z > 0.5 mm), so we can
+// restore it if reload_scene() unexpectedly snaps it to Z0.
+void Plater::priv::update_pre_move_snapshot()
+{
+    m_pre_move_offsets.clear();
+    for (ModelObject* obj : model.objects) {
+        if (obj->instances.empty()) continue;
+        const Vec3d offset = obj->instances[0]->get_offset();
+        m_pre_move_offsets[obj->id().id] = offset;
+        // Protect objects that are intentionally floating above the bed.
+        // min_z() returns the world-space bottom Z of the object.
+        const double mz = obj->min_z();
+        if (mz > 0.5)
+            m_floating_z_guard[obj->id().id] = offset;
+        else
+            m_floating_z_guard.erase(obj->id().id);
+    }
+}
+
+// After loading a project (3MF), rebuild the runtime map from the link_group_id
+// fields that were deserialized into each ModelObject.
+void Plater::priv::rebuild_link_groups_from_model()
+{
+    m_link_groups.clear();
+    int max_group = 0;
+    for (ModelObject* obj : model.objects) {
+        if (obj->link_group_id > 0) {
+            m_link_groups[obj->id().id] = obj->link_group_id;
+            max_group = std::max(max_group, obj->link_group_id);
+        }
+    }
+    m_next_link_group_id = max_group + 1;
+    update_pre_move_snapshot();
+}
+
+// Called instead of a plain update() whenever EVT_GLCANVAS_INSTANCE_MOVED fires.
+// Works for both mouse drag (snapshot taken at DRAGGING_STARTED) and sidebar XYZ
+// edits (snapshot refreshed at the end of every sync cycle).
+void Plater::priv::on_instance_moved_with_link_sync()
+{
+    // ── Guard: don't recurse when we ourselves set_offset on linked objects. ──
+    if (m_syncing_links) { update(); return; }
+
+    const Selection& sel = get_selection();
+
+    // ── FLOATING-Z GUARD (applies even without any link group) ────────────────
+    // Something in the Snapmaker fork's reload_scene() / pipeline resets the Z
+    // of floating objects (min_z > 0) to 0 whenever update() is called.
+    // m_floating_z_guard (populated by update_pre_move_snapshot) holds the
+    // last-known canonical offset for every such object.  After every update()
+    // call we restore objects whose Z was silently changed, using both a
+    // synchronous pass AND a deferred wxCallAfter to catch any async resets.
+
+    // Helper lambda: restore floating objects that were externally snapped to Z0.
+    // Returns true if at least one position was corrected.
+    auto restore_floating_z = [this]() -> bool {
+        if (m_floating_z_guard.empty()) return false;
+        bool changed = false;
+        m_syncing_links = true;
+        for (ModelObject* obj : model.objects) {
+            if (obj->instances.empty()) continue;
+            const auto git = m_floating_z_guard.find(obj->id().id);
+            if (git == m_floating_z_guard.end()) continue;
+            const Vec3d current = obj->instances[0]->get_offset();
+            if ((current - git->second).norm() > 1e-4) {
+                obj->instances[0]->set_offset(git->second);
+                changed = true;
+            }
+        }
+        m_syncing_links = false;
+        return changed;
+    };
+
+    // ── WIPE/PRIME TOWER guard ────────────────────────────────────────────────
+    // The tower is not a real ModelObject; its GLVolume may alias real object
+    // indices.  We must never run link propagation for it.
+    if (sel.is_wipe_tower()) {
+        update_pre_move_snapshot();
+        update();
+        if (restore_floating_z()) {
+            update_pre_move_snapshot();
+            view3D->reload_scene(false); // visual-only refresh, no position side-effects
+        }
+        // Deferred restore: catches async resets that fire after we return.
+        auto guard_copy = m_floating_z_guard;
+        wxTheApp->CallAfter([this, guard_copy]() {
+            if (guard_copy.empty()) return;
+            bool changed = false;
+            m_syncing_links = true;
+            for (ModelObject* obj : model.objects) {
+                if (obj->instances.empty()) continue;
+                const auto git = guard_copy.find(obj->id().id);
+                if (git == guard_copy.end()) continue;
+                if ((obj->instances[0]->get_offset() - git->second).norm() > 1e-4) {
+                    obj->instances[0]->set_offset(git->second);
+                    changed = true;
+                }
+            }
+            m_syncing_links = false;
+            if (changed) {
+                update_pre_move_snapshot();
+                view3D->reload_scene(false);
+            }
+        });
+        return;
+    }
+
+    // ── Fast path: no link groups ─────────────────────────────────────────────
+    if (m_link_groups.empty()) {
+        update();
+        if (restore_floating_z()) {
+            update_pre_move_snapshot();
+            view3D->reload_scene(false);
+        }
+        // Deferred restore (same as wipe-tower path).
+        auto guard_copy = m_floating_z_guard;
+        wxTheApp->CallAfter([this, guard_copy]() {
+            if (guard_copy.empty()) return;
+            bool changed = false;
+            m_syncing_links = true;
+            for (ModelObject* obj : model.objects) {
+                if (obj->instances.empty()) continue;
+                const auto git = guard_copy.find(obj->id().id);
+                if (git == guard_copy.end()) continue;
+                if ((obj->instances[0]->get_offset() - git->second).norm() > 1e-4) {
+                    obj->instances[0]->set_offset(git->second);
+                    changed = true;
+                }
+            }
+            m_syncing_links = false;
+            if (changed) {
+                update_pre_move_snapshot();
+                view3D->reload_scene(false);
+            }
+        });
+        return;
+    }
+
+    // ── LINK PROPAGATION ─────────────────────────────────────────────────────
+    // Collect object indices of everything the user explicitly moved (selection).
+    std::set<int>    moved_obj_idxs;
+    std::set<size_t> moved_obj_ids;
+    for (unsigned int vi : sel.get_volume_idxs()) {
+        int oi = sel.get_volume(vi)->object_idx();
+        if (oi >= 0 && oi < (int)model.objects.size()) {
+            moved_obj_idxs.insert(oi);
+            moved_obj_ids.insert(model.objects[oi]->id().id);
+        }
+    }
+
+    // DOUBLE-DELTA FIX: process each link group only once; skip group members
+    // that the gizmo already moved (they are in the selection).
+    std::set<int> processed_groups;
+
+    for (int moved_idx : moved_obj_idxs) {
+        if (moved_idx < 0 || moved_idx >= (int)model.objects.size()) continue;
+        ModelObject* moved_obj = model.objects[moved_idx];
+        if (moved_obj->instances.empty()) continue;
+        const size_t moved_id = moved_obj->id().id;
+
+        const auto git = m_link_groups.find(moved_id);
+        if (git == m_link_groups.end()) continue;
+        const int group_id = git->second;
+
+        if (processed_groups.count(group_id)) continue;
+        processed_groups.insert(group_id);
+
+        const auto pit = m_pre_move_offsets.find(moved_id);
+        if (pit == m_pre_move_offsets.end()) continue;
+        const Vec3d delta = moved_obj->instances[0]->get_offset() - pit->second;
+        if (delta.norm() < 1e-6) continue;
+
+        // Filter spurious Z-reset deltas: large Z dominated, tiny XY.
+        Vec3d safe_delta = delta;
+        const double xy_mag = Vec2d(delta.x(), delta.y()).norm();
+        if (std::abs(delta.z()) > 0.5 && xy_mag < std::abs(delta.z()) * 0.1)
+            safe_delta.z() = 0.0;
+
+        // Apply delta to non-selected followers only.
+        m_syncing_links = true;
+        for (int other_idx = 0; other_idx < (int)model.objects.size(); ++other_idx) {
+            if (other_idx == moved_idx) continue;
+            ModelObject* other = model.objects[other_idx];
+            if (other->instances.empty()) continue;
+            const auto og = m_link_groups.find(other->id().id);
+            if (og == m_link_groups.end() || og->second != group_id) continue;
+            if (moved_obj_ids.count(other->id().id)) continue;
+            for (ModelInstance* inst : other->instances) {
+                const Vec3d new_offset = inst->get_offset() + safe_delta;
+                inst->set_offset(new_offset);
+                // Keep floating-z-guard in sync with intentional moves.
+                if (m_floating_z_guard.count(other->id().id))
+                    m_floating_z_guard[other->id().id] = new_offset;
+            }
+        }
+        m_syncing_links = false;
+    }
+
+    // Also update the guard for every selected object that moved intentionally.
+    for (int idx : moved_obj_idxs) {
+        if (idx < 0 || idx >= (int)model.objects.size()) continue;
+        ModelObject* obj = model.objects[idx];
+        if (obj->instances.empty()) continue;
+        if (m_floating_z_guard.count(obj->id().id))
+            m_floating_z_guard[obj->id().id] = obj->instances[0]->get_offset();
+    }
+
+    // Refresh baseline and re-render.
+    update_pre_move_snapshot();
+    update();
+
+    // Synchronous restore pass: catches resets that happen inside update().
+    if (restore_floating_z()) {
+        update_pre_move_snapshot();
+        view3D->reload_scene(false);
+    }
+
+    // Deferred restore: catches any async or deferred resets from update().
+    auto guard_copy = m_floating_z_guard;
+    wxTheApp->CallAfter([this, guard_copy]() {
+        if (guard_copy.empty()) return;
+        bool changed = false;
+        m_syncing_links = true;
+        for (ModelObject* obj : model.objects) {
+            if (obj->instances.empty()) continue;
+            const auto git = guard_copy.find(obj->id().id);
+            if (git == guard_copy.end()) continue;
+            if ((obj->instances[0]->get_offset() - git->second).norm() > 1e-4) {
+                obj->instances[0]->set_offset(git->second);
+                changed = true;
+            }
+        }
+        m_syncing_links = false;
+        if (changed) {
+            update_pre_move_snapshot();
+            view3D->reload_scene(false);
+        }
+    });
+}
+
+// Assign a shared link group id to all currently selected objects (≥ 2).
+void Plater::priv::link_selected_objects()
+{
+    const Selection& sel = get_selection();
+    std::set<int> obj_idxs;
+    for (unsigned int vi : sel.get_volume_idxs())
+        obj_idxs.insert(sel.get_volume(vi)->object_idx());
+
+    if (obj_idxs.size() < 2) {
+        notification_manager->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::WarningNotificationLevel,
+            _u8L("Select at least two objects to link."));
+        return;
+    }
+
+    Plater::TakeSnapshot snapshot(q, "Link Objects");
+
+    // Reuse an existing group_id if any selected object already belongs to one.
+    int group_id = -1;
+    for (int oi : obj_idxs) {
+        if (oi < 0 || oi >= (int)model.objects.size()) continue;
+        const auto git = m_link_groups.find(model.objects[oi]->id().id);
+        if (git != m_link_groups.end()) { group_id = git->second; break; }
+    }
+    if (group_id < 0) group_id = m_next_link_group_id++;
+
+    for (int oi : obj_idxs) {
+        if (oi < 0 || oi >= (int)model.objects.size()) continue;
+        ModelObject* obj = model.objects[oi];
+        m_link_groups[obj->id().id] = group_id;
+        obj->link_group_id = group_id;  // persisted in 3MF
+    }
+
+    notification_manager->push_notification(
+        NotificationType::CustomNotification,
+        NotificationManager::NotificationLevel::RegularNotificationLevel,
+        _u8L("Objects linked — they will move together. Right-click to Break Link."));
+
+    update_pre_move_snapshot();
+}
+
+// Remove selected objects from their link group(s).
+void Plater::priv::break_link_selected_objects()
+{
+    const Selection& sel = get_selection();
+    std::set<int> obj_idxs;
+    for (unsigned int vi : sel.get_volume_idxs())
+        obj_idxs.insert(sel.get_volume(vi)->object_idx());
+
+    Plater::TakeSnapshot snapshot(q, "Break Link");
+
+    for (int oi : obj_idxs) {
+        if (oi < 0 || oi >= (int)model.objects.size()) continue;
+        ModelObject* obj = model.objects[oi];
+        m_link_groups.erase(obj->id().id);
+        obj->link_group_id = 0;
+    }
+
+    notification_manager->push_notification(
+        NotificationType::CustomNotification,
+        NotificationManager::NotificationLevel::RegularNotificationLevel,
+        _u8L("Link broken."));
+
+    update_pre_move_snapshot();
+}
+
+// ─── END TEMPORAL LINK ────────────────────────────────────────────────────────
 
 void Plater::priv::schedule_background_process()
 {
@@ -11163,6 +11533,40 @@ void Plater::priv::show_right_click_menu(Vec2d mouse_position, wxMenu *menu)
     GLCanvas3D &canvas = *q->canvas3D();
     canvas.apply_retina_scale(mouse_position);
     canvas.set_popup_menu_position(mouse_position);
+    // TEMPORAL LINK: inject "Link Objects" / "Break Link" into any object context menu
+    if (menu && current_panel != assemble_view) {
+        const Selection& sel = get_selection();
+        const bool is_multi  = sel.is_multiple_full_instance() || sel.is_multiple_full_object();
+        const bool is_single = sel.is_single_full_instance()   || sel.is_single_full_object();
+
+        if (is_multi || is_single) {
+            // Determine whether any selected object already belongs to a link group
+            bool any_linked = false;
+            for (unsigned int vi : sel.get_volume_idxs()) {
+                const int oi = sel.get_volume(vi)->object_idx();
+                if (oi >= 0 && oi < (int)model.objects.size() &&
+                    m_link_groups.count(model.objects[oi]->id().id)) {
+                    any_linked = true;
+                    break;
+                }
+            }
+
+            menu->AppendSeparator();
+            if (is_multi) {
+                const int link_id = wxWindow::NewControlId();
+                menu->Append(link_id, _L("Link Objects"));
+                menu->Bind(wxEVT_COMMAND_MENU_SELECTED,
+                    [this](wxCommandEvent&) { link_selected_objects(); }, link_id);
+            }
+            if (any_linked) {
+                const int break_id = wxWindow::NewControlId();
+                menu->Append(break_id, _L("Break Link"));
+                menu->Bind(wxEVT_COMMAND_MENU_SELECTED,
+                    [this](wxCommandEvent&) { break_link_selected_objects(); }, break_id);
+            }
+        }
+    }
+
     q->PopupMenu(menu, position);
     canvas.clear_popup_menu_position();
 }
@@ -11246,6 +11650,7 @@ void Plater::priv::on_update_geometry(Vec3dsEvent<2>&)
 void Plater::priv::on_3dcanvas_mouse_dragging_started(SimpleEvent&)
 {
     view3D->get_canvas3d()->reset_sequential_print_clearance();
+    update_pre_move_snapshot(); // TEMPORAL LINK: capture positions before drag begins
 }
 
 // Update the scene from the background processing,
@@ -12360,6 +12765,8 @@ void Plater::priv::update_after_undo_redo(const UndoRedo::Snapshot& snapshot, bo
         this->view3D->get_canvas3d()->get_gizmos_manager().update_after_undo_redo(snapshot);
 
     wxGetApp().obj_list()->update_after_undo_redo();
+
+    rebuild_link_groups_from_model(); // TEMPORAL LINK: resync runtime map + position snapshot after undo/redo
 
     if (wxGetApp().get_mode() == comSimple && model_has_advanced_features(this->model)) {
         // If the user jumped to a snapshot that require user interface with advanced features, switch to the advanced mode without asking.
