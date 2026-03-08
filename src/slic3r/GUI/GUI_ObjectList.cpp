@@ -91,6 +91,32 @@ static void take_snapshot(const std::string& snapshot_name)
         plater->take_snapshot(snapshot_name);
 }
 
+// TEMPORAL LINK: palette of group colors cycling by group id (1-based).
+// These are used both by DrawItemText (prefix color) and by the background tint.
+static wxColour link_group_color(int group_id)
+{
+    // Five distinct hues, chosen to be visible on both light and dark themes.
+    static const wxColour palette[] = {
+        wxColour(0xE8, 0x88, 0x10),  // amber
+        wxColour(0x10, 0x9A, 0xE8),  // sky-blue
+        wxColour(0xA0, 0x30, 0xE0),  // purple
+        wxColour(0x18, 0xC0, 0x70),  // emerald
+        wxColour(0xE8, 0x30, 0x70),  // crimson
+    };
+    constexpr int N = sizeof(palette) / sizeof(palette[0]);
+    return palette[(group_id - 1) % N];
+}
+
+// Build the display name shown in the object list for a given ModelObject.
+// Objects belonging to a Temporal Link group get a "[L{id}] " prefix.
+static wxString make_link_display_name(const ModelObject* obj)
+{
+    wxString base = from_u8(obj->name);
+    if (obj->link_group_id > 0)
+        return wxString::Format("[L%d] ", obj->link_group_id) + base;
+    return base;
+}
+
 class wxRenderer : public wxDelegateRendererNative
 {
 public:
@@ -126,13 +152,42 @@ public:
         const wxString& text,
         const wxRect& rect,
         int align = wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL,
-        int flags = 0, // wxCONTROL_SELECTED wxCONTROL_FOCUSED wxCONTROL_DISABLED 
+        int flags = 0, // wxCONTROL_SELECTED wxCONTROL_FOCUSED wxCONTROL_DISABLED
         wxEllipsizeMode ellipsizeMode = wxELLIPSIZE_END
     ) override
-    {   // ORCA draw custom text to improve consistency between platforms
-        //dc.SetFont(win->GetFont()); Without SetFont it pulls font from window
-        dc.SetTextForeground(StateColor::darkModeColorFor(wxColour("#262E30"))); // use same color for selected / non-selected
-        dc.DrawText(text,wxPoint(rect.x, rect.y));
+    {
+        // TEMPORAL LINK: if the item name starts with "[Ln] ", draw that prefix
+        // in the group color and the rest of the name in normal text color.
+        // Pattern: "[L" + one-or-more digits + "] "
+        const wxColour normalColor = StateColor::darkModeColorFor(wxColour("#262E30"));
+        wxString prefix, rest;
+        int group_id = 0;
+        if (text.StartsWith("[L")) {
+            size_t close = text.find(']');
+            if (close != wxString::npos && close >= 3 && text[close + 1] == ' ') {
+                wxString between = text.Mid(2, close - 2); // digits between "[L" and "]"
+                long id = 0;
+                if (between.ToLong(&id) && id > 0) {
+                    group_id = (int)id;
+                    prefix = text.Left(close + 2); // "[Ln] "
+                    rest   = text.Mid(close + 2);
+                }
+            }
+        }
+
+        if (group_id > 0) {
+            // Draw colored prefix
+            wxColour gc = StateColor::darkModeColorFor(link_group_color(group_id));
+            dc.SetTextForeground(gc);
+            dc.DrawText(prefix, wxPoint(rect.x, rect.y));
+            // Draw remaining name in normal color
+            wxSize ps = dc.GetTextExtent(prefix);
+            dc.SetTextForeground(normalColor);
+            dc.DrawText(rest, wxPoint(rect.x + ps.GetWidth(), rect.y));
+        } else {
+            dc.SetTextForeground(normalColor);
+            dc.DrawText(text, wxPoint(rect.x, rect.y));
+        }
     }
 };
 
@@ -772,6 +827,25 @@ void ObjectList::update_name_for_items()
     m_objects_model->UpdateItemNames();
 
     wxGetApp().plater()->update();
+}
+
+// TEMPORAL LINK: refresh the displayed name for every object in the list,
+// applying the "[Ln] " group prefix where applicable.
+// Must be called after link_selected_objects(), break_link_selected_objects(),
+// and rebuild_link_groups_from_model() (undo/redo, project load).
+void ObjectList::refresh_link_names()
+{
+    if (!m_objects) return;
+    for (size_t i = 0; i < m_objects->size(); ++i) {
+        const ModelObject* obj = (*m_objects)[i];
+        if (!obj) continue;
+        wxDataViewItem item = m_objects_model->GetItemById((int)i);
+        if (!item) continue;
+        const wxString display_name = make_link_display_name(obj);
+        if (m_objects_model->GetName(item) != display_name)
+            m_objects_model->SetName(display_name, item);
+    }
+    Refresh();
 }
 
 void ObjectList::object_config_options_changed(const ObjectVolumeID& ov_id)
@@ -3858,9 +3932,13 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed,
     //std::string item_name_str = (boost::format("[P%1%][O%2%]%3%") % plate_idx % std::to_string(obj_idx) % model_object->name).str();
     //std::string item_name_str = (boost::format("[P%1%]%2%") % plate_idx  % model_object->name).str();
     //const wxString& item_name = from_u8(item_name_str);
-    const wxString& item_name = from_u8(model_object->name);
+    // TEMPORAL LINK: build display name with group prefix if applicable.
+    const wxString item_name = make_link_display_name(model_object);
     std::string warning_bitmap = get_warning_icon_name(model_object->mesh().stats());
     const auto item = m_objects_model->AddObject(model_object, warning_bitmap, model_object->is_cut());
+    // Override the name stored in the model node with our link-aware display name.
+    if (model_object->link_group_id > 0)
+        m_objects_model->SetName(item_name, item);
     Expand(m_objects_model->GetParent(item));
 
     if (!do_info_update)
@@ -3934,7 +4012,8 @@ wxDataViewItemArray ObjectList::add_volumes_to_object_in_list(size_t obj_idx, st
     // add volumes to the object
     if (can_add_volumes_to_object(object)) {
         if (object->volumes.size() > 1) {
-            wxString obj_item_name = from_u8(object->name);
+            // TEMPORAL LINK: use link-aware display name (includes "[Ln] " prefix).
+            wxString obj_item_name = make_link_display_name(object);
             if (m_objects_model->GetName(object_item) != obj_item_name)
                 m_objects_model->SetName(obj_item_name, object_item);
         }

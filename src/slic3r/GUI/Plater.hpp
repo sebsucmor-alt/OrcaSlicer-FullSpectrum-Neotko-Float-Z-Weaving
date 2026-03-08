@@ -554,6 +554,8 @@ public:
 
     void copy_selection_to_clipboard();
     void paste_from_clipboard();
+    void regroup_pasted_link_objects(const std::vector<size_t>& object_idxs); // TEMPORAL LINK
+    void apply_print_preset_to_selected_objects(const std::string& preset_name); // Apply process preset per-object
     //BBS: add clone logic
     void clone_selection();
     void center_selection();

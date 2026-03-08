@@ -246,6 +246,41 @@ ParamsPanel::ParamsPanel( wxWindow* parent, wxWindowID id, const wxPoint& pos, c
         {
             m_highlighter.blink();
         });
+
+        // OBJECT PRESET BUTTON: sits in the top bar next to the tips_arrow.
+        // Opens a preset picker and applies the chosen process preset to all
+        // currently selected objects.
+        m_object_preset_btn = new ScalableButton(
+            m_top_panel, wxID_ANY, "save",
+            wxEmptyString, wxDefaultSize, wxDefaultPosition,
+            wxBU_EXACTFIT | wxNO_BORDER, true);
+        m_object_preset_btn->SetToolTip(_L("Apply a process preset to selected object(s)"));
+
+        m_object_preset_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            const auto& prints = wxGetApp().preset_bundle->prints;
+            wxArrayString names;
+            for (const auto& p : prints) {
+                // Only user presets (not system, not the internal default placeholder)
+                if (!p.is_default && !p.is_system)
+                    names.Add(from_u8(p.name));
+            }
+            names.Sort();
+            if (names.IsEmpty()) {
+                wxMessageBox(_L("No process presets available."), _L("Apply preset"), wxOK | wxICON_INFORMATION, this);
+                return;
+            }
+            wxSingleChoiceDialog dlg(
+                this,
+                _L("Select a process preset to apply to selected object(s):"),
+                _L("Apply Process Preset"),
+                names);
+            if (dlg.ShowModal() != wxID_OK) return;
+            // Defer until dialog is fully closed and stack is clean
+            const std::string chosen = dlg.GetStringSelection().ToUTF8().data();
+            wxGetApp().CallAfter([chosen]() {
+                wxGetApp().plater()->apply_print_preset_to_selected_objects(chosen);
+            });
+        });
     }
 
 
@@ -368,6 +403,11 @@ void ParamsPanel::create_layout()
         m_mode_sizer->Add(m_mode_region, 0, wxALIGN_CENTER);
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         m_mode_sizer->Add(m_tips_arrow, 0, wxALIGN_CENTER);
+        // OBJECT PRESET BUTTON: always visible in the top bar
+        if (m_object_preset_btn) {
+            m_mode_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
+            m_mode_sizer->Add(m_object_preset_btn, 0, wxALIGN_CENTER);
+        }
         m_mode_sizer->AddStretchSpacer(8);
         m_mode_sizer->Add( m_title_view, 0, wxALIGN_CENTER );
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
@@ -595,6 +635,7 @@ void ParamsPanel::set_active_tab(wxPanel* tab)
         //m_left_sizer->GetItem(t)->SetProportion(tab == t ? 1 : 0);
     }
     m_left_sizer->Layout();
+
     if (auto dialog = dynamic_cast<wxDialog*>(GetParent())) {
         wxString title = cur_tab->type() == Preset::TYPE_FILAMENT ? _L("Material settings") : _L("Printer settings");
         dialog->SetTitle(title);
@@ -651,6 +692,7 @@ void ParamsPanel::msw_rescale()
     if (m_search_btn) m_search_btn->msw_rescale();
     if (m_compare_btn) m_compare_btn->msw_rescale();
     if (m_tips_arrow) m_tips_arrow->msw_rescale();
+    if (m_object_preset_btn) m_object_preset_btn->msw_rescale();
     m_left_sizer->SetMinSize(wxSize(40 * em_unit(this), -1));
     if (m_mode_sizer)
         m_mode_sizer->SetMinSize(-1, 3 * em_unit(this));

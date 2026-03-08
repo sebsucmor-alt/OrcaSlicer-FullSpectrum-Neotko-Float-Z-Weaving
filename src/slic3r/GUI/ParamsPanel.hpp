@@ -118,6 +118,9 @@ class ParamsPanel : public wxPanel
         ScalableButton*		m_search_btn { nullptr };
         ScalableButton*		m_compare_btn { nullptr };
 
+        // OBJECT PRESET BUTTON: in the top bar, applies a process preset to selected object(s).
+        ScalableButton*     m_object_preset_btn   { nullptr };
+
         wxBitmap m_toggle_on_icon;
         wxBitmap m_toggle_off_icon;
 

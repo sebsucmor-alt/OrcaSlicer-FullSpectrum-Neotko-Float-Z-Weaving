@@ -8794,6 +8794,38 @@ void Plater::priv::update_pre_move_snapshot()
 // fields that were deserialized into each ModelObject.
 void Plater::priv::rebuild_link_groups_from_model()
 {
+    // TEMPORAL LINK: parse [Ln] prefix from object names as primary source
+    // of link_group_id (store_bbs_3mf encodes it there; link_group_id field
+    // may also be set by the Prusa-format importer as belt-and-suspenders).
+    auto strip_link_prefix = [](const std::string& name, int& out_gid) -> std::string {
+        out_gid = 0;
+        if (name.size() > 3 && name[0] == '[' && name[1] == 'L') {
+            size_t close = name.find(']');
+            if (close != std::string::npos && close > 2) {
+                bool all_digits = true;
+                for (size_t ci = 2; ci < close; ++ci)
+                    if (!std::isdigit((unsigned char)name[ci])) { all_digits = false; break; }
+                if (all_digits) {
+                    out_gid = std::stoi(name.substr(2, close - 2));
+                    size_t skip = close + 1;
+                    while (skip < name.size() && name[skip] == ' ') ++skip;
+                    return name.substr(skip);
+                }
+            }
+        }
+        return name;
+    };
+
+    for (ModelObject* obj : model.objects) {
+        int gid = 0;
+        std::string clean = strip_link_prefix(obj->name, gid);
+        if (gid > 0) {
+            obj->name = clean;           // store clean name in model
+            obj->link_group_id = gid;    // ensure field is set
+        }
+        // If name had no prefix but link_group_id was set by metadata, keep it.
+    }
+
     m_link_groups.clear();
     int max_group = 0;
     for (ModelObject* obj : model.objects) {
@@ -8804,6 +8836,11 @@ void Plater::priv::rebuild_link_groups_from_model()
     }
     m_next_link_group_id = max_group + 1;
     update_pre_move_snapshot();
+    // Defer so it fires after all post-load UI ops (reload_all_plates, select_plate).
+    wxGetApp().CallAfter([]() {
+        if (wxGetApp().obj_list())
+            wxGetApp().obj_list()->refresh_link_names();
+    });
 }
 
 // Called instead of a plain update() whenever EVT_GLCANVAS_INSTANCE_MOVED fires.
@@ -9051,6 +9088,8 @@ void Plater::priv::link_selected_objects()
         _u8L("Objects linked — they will move together. Right-click to Break Link."));
 
     update_pre_move_snapshot();
+    // TEMPORAL LINK: refresh the object list to show "[Ln] " prefixes.
+    wxGetApp().obj_list()->refresh_link_names();
 }
 
 // Remove selected objects from their link group(s).
@@ -9076,6 +9115,8 @@ void Plater::priv::break_link_selected_objects()
         _u8L("Link broken."));
 
     update_pre_move_snapshot();
+    // TEMPORAL LINK: refresh the object list to remove "[Ln] " prefixes.
+    wxGetApp().obj_list()->refresh_link_names();
 }
 
 // ─── END TEMPORAL LINK ────────────────────────────────────────────────────────
@@ -16457,7 +16498,46 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
         }
     }
 
+    // TEMPORAL LINK: encode [Ln] prefix into object names before saving.
+    // store_bbs_3mf is in a separate translation unit we cannot patch, so we
+    // inject the group info into the name (which every 3MF reader preserves).
+    // Strip first to prevent double-prefix on repeated saves.
+    auto link_strip_prefix = [](const std::string& name) -> std::string {
+        if (name.size() > 3 && name[0] == '[' && name[1] == 'L') {
+            size_t close = name.find(']');
+            if (close != std::string::npos && close > 2) {
+                bool all_digits = true;
+                for (size_t ci = 2; ci < close; ++ci)
+                    if (!std::isdigit((unsigned char)name[ci])) { all_digits = false; break; }
+                if (all_digits) {
+                    size_t skip = close + 1;
+                    while (skip < name.size() && name[skip] == ' ') ++skip;
+                    return name.substr(skip);
+                }
+            }
+        }
+        return name;
+    };
+    // Encode and remember originals for restore
+    std::vector<std::string> orig_names;
+    orig_names.reserve(p->model.objects.size());
+    for (ModelObject* obj : p->model.objects) {
+        orig_names.push_back(obj->name);
+        std::string clean = link_strip_prefix(obj->name);
+        if (obj->link_group_id > 0)
+            obj->name = "[L" + std::to_string(obj->link_group_id) + "] " + clean;
+        else
+            obj->name = clean;
+    }
+
     bool store_result = Slic3r::store_bbs_3mf(store_params);
+
+    // Restore original names immediately after save
+    {
+        size_t ni = 0;
+        for (ModelObject* obj : p->model.objects)
+            if (ni < orig_names.size()) obj->name = orig_names[ni++];
+    }
     // reset designed info
     if (!has_design_info)
         p->model.design_info = nullptr;
@@ -18060,6 +18140,92 @@ void Plater::paste_from_clipboard()
 }
 
 //BBS: add clone
+// TEMPORAL LINK: after paste, assign brand-new independent link groups to the
+// pasted objects that came from linked originals.
+// object_idxs — indices into model.objects of the freshly pasted objects.
+void Plater::regroup_pasted_link_objects(const std::vector<size_t>& object_idxs)
+{
+    if (object_idxs.empty()) return;
+
+    // Build map: old_link_group_id -> list of new object indices with that id.
+    std::map<int, std::vector<size_t>> old_group_to_new_idxs;
+    for (size_t idx : object_idxs) {
+        if (idx >= p->model.objects.size()) continue;
+        ModelObject* obj = p->model.objects[idx];
+        if (obj->link_group_id > 0)
+            old_group_to_new_idxs[obj->link_group_id].push_back(idx);
+    }
+
+    if (old_group_to_new_idxs.empty()) return;
+
+    // For each original group that has 2+ pasted copies, assign a fresh group id.
+    for (auto& [old_gid, idxs] : old_group_to_new_idxs) {
+        if (idxs.size() < 2) {
+            // Only one member pasted — clear its link_group_id (no group).
+            ModelObject* obj = p->model.objects[idxs[0]];
+            obj->link_group_id = 0;
+            continue;
+        }
+        const int new_gid = p->m_next_link_group_id++;
+        for (size_t idx : idxs) {
+            ModelObject* obj = p->model.objects[idx];
+            obj->link_group_id = new_gid;
+            p->m_link_groups[obj->id().id] = new_gid;
+        }
+    }
+
+    p->update_pre_move_snapshot();
+    wxGetApp().obj_list()->refresh_link_names();
+}
+
+// Apply all per-object print config keys from the named preset to every
+// currently selected object.  Keys that don't exist in the preset are left
+// untouched in the object's override config.
+void Plater::apply_print_preset_to_selected_objects(const std::string& preset_name)
+{
+    const Preset* preset = wxGetApp().preset_bundle->prints.find_preset(preset_name, false);
+    if (!preset) return;
+
+    // Collect selected object indices.
+    const Selection& sel = p->get_selection();
+    std::set<int> obj_idxs;
+    for (unsigned int vi : sel.get_volume_idxs())
+        obj_idxs.insert(sel.get_volume(vi)->object_idx());
+    if (obj_idxs.empty()) return;
+
+    TakeSnapshot snapshot(this, "Apply preset to objects");
+
+    // Build the list of keys that are safe as per-object overrides.
+    // ONLY PrintObjectConfig + PrintRegionConfig keys are valid here.
+    // Multimaterial-specific keys are excluded so they remain shared/global.
+    static const std::set<std::string> s_mm_keys {
+        "wall_filament", "sparse_infill_filament", "solid_infill_filament",
+        "support_filament", "support_interface_filament",
+        "flush_into_objects", "flush_into_infill", "flush_into_support",
+        "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
+        "wipe_speed", "wipe_on_loops", "wipe_before_external_loop",
+        "role_based_wipe_speed", "support_interface_not_for_body"
+    };
+    t_config_option_keys safe_keys;
+    {
+        const t_config_option_keys obj_keys = PrintObjectConfig().keys();
+        const t_config_option_keys reg_keys = PrintRegionConfig().keys();
+        for (const auto& k : obj_keys)
+            if (s_mm_keys.find(k) == s_mm_keys.end()) safe_keys.push_back(k);
+        for (const auto& k : reg_keys)
+            if (s_mm_keys.find(k) == s_mm_keys.end()) safe_keys.push_back(k);
+    }
+
+    std::vector<size_t> changed_idxs(obj_idxs.begin(), obj_idxs.end());
+    for (int oi : obj_idxs) {
+        if (oi < 0 || oi >= (int)p->model.objects.size()) continue;
+        ModelObject* obj = p->model.objects[oi];
+        obj->config.apply_only(preset->config, safe_keys, /*ignore_nonexistent=*/true);
+    }
+
+    this->changed_objects(changed_idxs);
+}
+
 void Plater::clone_selection()
 {
     if (is_selection_empty())

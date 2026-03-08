@@ -2039,37 +2039,50 @@ void Selection::copy_to_clipboard()
         return (*m_volumes)[left]->volume_idx() < (*m_volumes)[right]->volume_idx();
     });
 
-    for (const ObjectIdxsToInstanceIdxsMap::value_type& object : m_cache.content) {
-        ModelObject* src_object = m_model->objects[object.first];
+    // TEMPORAL LINK: build the set of object indices to copy.
+    // Start from the explicit selection, then expand to include every link-group
+    // partner of each selected object (partners are identified by the same
+    // link_group_id on ModelObject).  We track which original group_ids are
+    // present so paste_objects_from_clipboard() can create fresh groups for the
+    // copies.
+    std::set<int> copy_obj_idxs;
+    for (const ObjectIdxsToInstanceIdxsMap::value_type& object : m_cache.content)
+        copy_obj_idxs.insert(object.first);
+
+    for (int selected_idx : copy_obj_idxs) {
+        const ModelObject* sel_obj = m_model->objects[selected_idx];
+        if (sel_obj->link_group_id <= 0) continue;
+        const int gid = sel_obj->link_group_id;
+        for (int oi = 0; oi < (int)m_model->objects.size(); ++oi) {
+            if (oi == selected_idx) continue;
+            if (m_model->objects[oi]->link_group_id == gid)
+                copy_obj_idxs.insert(oi);
+        }
+    }
+
+    for (int obj_idx : copy_obj_idxs) {
+        ModelObject* src_object = m_model->objects[obj_idx];
         ModelObject* dst_object = m_clipboard.add_object();
         dst_object->name                 = src_object->name;
         dst_object->input_file           = src_object->input_file;
-		dst_object->config.assign_config(src_object->config);
+        dst_object->config.assign_config(src_object->config);
         dst_object->sla_support_points   = src_object->sla_support_points;
         dst_object->sla_points_status    = src_object->sla_points_status;
         dst_object->sla_drain_holes      = src_object->sla_drain_holes;
         dst_object->brim_points          = src_object->brim_points;
-        dst_object->layer_config_ranges  = src_object->layer_config_ranges;     // #ys_FIXME_experiment
+        dst_object->layer_config_ranges  = src_object->layer_config_ranges;
         dst_object->layer_height_profile.assign(src_object->layer_height_profile);
         dst_object->origin_translation   = src_object->origin_translation;
+        // TEMPORAL LINK: preserve link_group_id so paste can assign fresh groups.
+        dst_object->link_group_id        = src_object->link_group_id;
 
-        for (int i : object.second) {
-            dst_object->add_instance(*src_object->instances[i]);
-        }
+        // Use the first instance of the source object.
+        dst_object->add_instance(*src_object->instances[0]);
 
-        for (unsigned int i : selected_list) {
-            // Copy the ModelVolumes only for the selected GLVolumes of the 1st selected instance.
-            const GLVolume* volume = (*m_volumes)[i];
-            if (volume->object_idx() == object.first && volume->instance_idx() == *object.second.begin()) {
-                int volume_idx = volume->volume_idx();
-                if (0 <= volume_idx && volume_idx < (int)src_object->volumes.size()) {
-                    ModelVolume* src_volume = src_object->volumes[volume_idx];
-                    ModelVolume* dst_volume = dst_object->add_volume(*src_volume);
-                    dst_volume->set_new_unique_id();
-                }
-                else
-                    assert(false);
-            }
+        // Copy all volumes.
+        for (ModelVolume* src_volume : src_object->volumes) {
+            ModelVolume* dst_volume = dst_object->add_volume(*src_volume);
+            dst_volume->set_new_unique_id();
         }
     }
 
@@ -3182,6 +3195,10 @@ void Selection::paste_objects_from_clipboard()
     }
 
     wxGetApp().obj_list()->paste_objects_into_list(object_idxs);
+
+    // TEMPORAL LINK: assign fresh independent link groups to pasted objects
+    // that originated from linked groups.
+    wxGetApp().plater()->regroup_pasted_link_objects(object_idxs);
 
 #ifdef _DEBUG
     check_model_ids_validity(*m_model);
