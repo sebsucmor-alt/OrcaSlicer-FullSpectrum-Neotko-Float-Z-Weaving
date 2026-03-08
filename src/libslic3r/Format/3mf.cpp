@@ -898,8 +898,32 @@ ModelVolumeType type_from_string(const std::string &s)
 
                 // apply object's name and config data
                 for (const Metadata& metadata : obj_metadata->second.metadata) {
-                    if (metadata.key == "name")
-                        model_object->name = metadata.value;
+                    if (metadata.key == "name") {
+                        std::string raw = metadata.value;
+                        // TEMPORAL LINK: parse [Ln] prefix as fallback for link_group_id
+                        // (in case explicit link_group_id metadata is missing).
+                        // Always strip the prefix from the stored name so the model
+                        // object's name stays clean; the display layer adds it back.
+                        if (raw.size() > 3 && raw[0] == '[' && raw[1] == 'L') {
+                            size_t close = raw.find(']');
+                            if (close != std::string::npos) {
+                                bool all_digits = true;
+                                for (size_t ci = 2; ci < close; ++ci)
+                                    if (!std::isdigit((unsigned char)raw[ci])) { all_digits = false; break; }
+                                if (all_digits && close > 2) {
+                                    int parsed_gid = std::stoi(raw.substr(2, close - 2));
+                                    // Only set if not already set by explicit metadata
+                                    if (model_object->link_group_id == 0)
+                                        model_object->link_group_id = parsed_gid;
+                                    // Strip prefix from stored name
+                                    size_t skip = close + 1;
+                                    while (skip < raw.size() && raw[skip] == ' ') ++skip;
+                                    raw = raw.substr(skip);
+                                }
+                            }
+                        }
+                        model_object->name = raw;
+                    }
                     else if (metadata.key == "link_group_id")  // TEMPORAL LINK
                         model_object->link_group_id = std::stoi(metadata.value);
                     else
@@ -3103,10 +3127,32 @@ ModelVolumeType type_from_string(const std::string &s)
                 stream << " <" << OBJECT_TAG << " " << ID_ATTR << "=\"" << obj_metadata.first << "\" " << INSTANCESCOUNT_ATTR << "=\"" << obj->instances.size() << "\">\n";
 
                 // stores object's name
-                if (!obj->name.empty())
-                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"name\" " << VALUE_ATTR << "=\"" << xml_escape(obj->name) << "\"/>\n";
+                // TEMPORAL LINK: encode [Ln] prefix into the stored name so the
+                // group survives even in 3MF viewers that ignore custom metadata.
+                // Guard against double-prefix: strip any existing [L...] prefix first.
+                if (!obj->name.empty()) {
+                    std::string stored_name = obj->name;
+                    // Strip existing [L<digits>] prefix if present
+                    if (stored_name.size() > 3 && stored_name[0] == '[' && stored_name[1] == 'L') {
+                        size_t close = stored_name.find(']');
+                        if (close != std::string::npos && close + 1 < stored_name.size()) {
+                            bool all_digits = true;
+                            for (size_t ci = 2; ci < close; ++ci)
+                                if (!std::isdigit((unsigned char)stored_name[ci])) { all_digits = false; break; }
+                            if (all_digits) {
+                                size_t skip = close + 1;
+                                while (skip < stored_name.size() && stored_name[skip] == ' ') ++skip;
+                                stored_name = stored_name.substr(skip);
+                            }
+                        }
+                    }
+                    // Re-encode the current group
+                    if (obj->link_group_id > 0)
+                        stored_name = "[L" + std::to_string(obj->link_group_id) + "] " + stored_name;
+                    stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"name\" " << VALUE_ATTR << "=\"" << xml_escape(stored_name) << "\"/>\n";
+                }
 
-                // TEMPORAL LINK: persist link group so it survives save/load
+                // TEMPORAL LINK: also persist as explicit metadata (belt-and-suspenders)
                 if (obj->link_group_id > 0)
                     stream << "  <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << OBJECT_TYPE << "\" " << KEY_ATTR << "=\"link_group_id\" " << VALUE_ATTR << "=\"" << obj->link_group_id << "\"/>\n";
 
