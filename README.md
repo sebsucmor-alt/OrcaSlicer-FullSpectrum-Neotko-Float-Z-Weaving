@@ -24,15 +24,13 @@ All info documentation and changes listed - Update v5
 - Working Select Uesr Process for any object, except Multimaterial tag to avoid mix options with Wipetower
 - All other stuff comment downbelow all documented
 
-- SORRY it's in **Spanish** (use a web translator, I can't keep all in both languages for me and online, it takes too much time sorry
-
-# OrcaSlicer FullSpectrum — Informe de Patches
-**Build:** Snapmaker FullSpectrum fork de OrcaSlicer 0.9.3
-**Última actualización:** 2026-03-08 (sesión 5)
+# OrcaSlicer FullSpectrum — Patches Report
+**Build:** Snapmaker FullSpectrum fork of OrcaSlicer 0.9.3
+**Last updated:** 2026-03-08 (session 5)
 
 ---
 
-## Estructura de ficheros modificados
+## Modified files structure
 
 ```
 src/
@@ -41,164 +39,169 @@ src/
 │   ├── PrintObject.cpp        Feature 3
 │   ├── GCode.cpp              Features 3, 5, 6
 │   ├── Preset.cpp             Features 3, 5, 6
-│   ├── Print.cpp              Patches preexistentes
+│   ├── Print.cpp              Pre-existing patches
 │   ├── Model.hpp/cpp          Feature 8 (Temporal Link)
-│   ├── Fill/FillBase.cpp      Referencia
+│   ├── Fill/FillBase.cpp      Reference only
 │   └── Format/3mf.cpp         Feature 8 + 3MF persistence
 └── slic3r/GUI/
     ├── Tab.cpp                Features 3, 4, 5, 6 + Bug 9
-    ├── Plater.hpp/cpp         Features 7, 8, 11, 12, 13
+    ├── Plater.hpp/cpp         Features 7, 8, 11, 12, 13 + STL origin bug fix
     ├── GLCanvas3D.hpp/cpp     Bug 10
     ├── GUI_ObjectList.hpp/cpp Feature 11
     ├── Selection.hpp/cpp      Feature 12
     ├── ParamsPanel.hpp/cpp    Feature 13
-    └── PresetComboBoxes.hpp/cpp  Referencia
+    └── PresetComboBoxes.hpp/cpp  Reference only
 ```
 
 ---
 
-## Features implementadas
+## Implemented features
 
 ### Feature 3 — disable_bridge_infill
-Enum `DisableBridgeInfill` con opciones: None, Partial, Full.
-Afecta a `PrintConfig.hpp/cpp`, `PrintObject.cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
+`DisableBridgeInfill` enum with options: None, Partial, Full.
+Affects `PrintConfig.hpp/cpp`, `PrintObject.cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
 
 ### Feature 4 — Top/Bottom Surface Density UI
-Controles de densidad de superficie superior/inferior en la UI de parámetros.
-Afecta a `PrintConfig.hpp/cpp`, `Tab.cpp`.
+Top and bottom surface density controls in the parameters UI.
+Affects `PrintConfig.hpp/cpp`, `Tab.cpp`.
 
-### Feature 5 — Neotko Interlayer Sanding (superficie)
-Lijado intercapas para superficies externas (`erTopSolidInfill`).
-Afecta a `PrintConfig.hpp/cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
+### Feature 5 — Neotko Interlayer Sanding (surfaces)
+Inter-layer sanding for external surfaces (`erTopSolidInfill`).
+Affects `PrintConfig.hpp/cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
 
 ### Feature 6 — Neotko Infill Interlayer Sanding
-Lijado intercapas para relleno interno (`erInternalInfill`).
-Afecta a `PrintConfig.hpp/cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
+Inter-layer sanding for internal infill (`erInternalInfill`).
+Affects `PrintConfig.hpp/cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
 
 ### Feature 7 — STL file origin preservation
-Objetos cuyo centro XY supera 0.5 mm del origen mantienen su posición original al importar.
-Afecta a `Plater.cpp`.
+Objects whose XY position in the file is not exactly (0,0) retain their original coordinates on import without auto-centering on the bed. Only STLs exported at the absolute origin are auto-placed at bed center.
+
+**Implementation in `Plater.cpp` (`load_model_objects`):**
+- On instance creation, `orig_bbox.center()` is captured before `center_around_origin()` moves the mesh
+- Instance offset is restored to the file's world-space coordinates
+- In the auto-placement loop: `has_any_file_position = (x != 0.0 || y != 0.0)` — any non-zero offset is preserved; auto-centering only happens when offset is exactly `(0, 0)`
+
+**Bug fixed this session:** The previous 0.5 mm threshold caused assembly parts whose individual bounding-box center is near the origin to be wrongly repositioned when loaded one by one, even though loading them all at once (via "Load as single object with multiple parts") worked correctly. Both load paths are now consistent.
 
 ---
 
-## Feature 8 — Temporal Link (sistema completo)
+## Feature 8 — Temporal Link (full system)
 
-Agrupa objetos para movimiento XYZ conjunto sin afectar al slicing.
+Groups objects for joint XYZ movement without affecting slicing.
 
-### Núcleo del sistema
-- `int link_group_id { 0 }` en `ModelObject` (`Model.hpp/cpp`), serializado en cereal + assign_copy
-- Runtime en `Plater::priv`: `m_link_groups`, `m_next_link_group_id`, `m_pre_move_offsets`, `m_syncing_links`, `m_floating_z_guard`
-- Funciones: `update_pre_move_snapshot()`, `rebuild_link_groups_from_model()`, `on_instance_moved_with_link_sync()`, `link_selected_objects()`, `break_link_selected_objects()`
-- Menú contextual: "Link Objects" / "Break Link"
+### Core system
+- `int link_group_id { 0 }` in `ModelObject` (`Model.hpp/cpp`), serialized in cereal + assign_copy
+- Runtime fields in `Plater::priv`: `m_link_groups`, `m_next_link_group_id`, `m_pre_move_offsets`, `m_syncing_links`, `m_floating_z_guard`
+- Functions: `update_pre_move_snapshot()`, `rebuild_link_groups_from_model()`, `on_instance_moved_with_link_sync()`, `link_selected_objects()`, `break_link_selected_objects()`
+- Context menu: "Link Objects" / "Break Link"
 - Hooks: `EVT_GLCANVAS_INSTANCE_MOVED`, `DRAGGING_STARTED`, `update_after_undo_redo`, `load_model_objects`, `remove()`
 
-### Persistencia en 3MF (Plater.cpp)
-Dado que `store_bbs_3mf` y `read_from_archive` son funciones BBS en ficheros fuera del patch set, la persistencia se implementa en Plater.cpp:
+### 3MF persistence (`Plater.cpp`)
+`store_bbs_3mf` and `read_from_archive` are BBS functions in source files outside the patch set, so persistence is implemented directly in `Plater.cpp`:
 
-**Al guardar** (`export_3mf` → antes de `store_bbs_3mf`):
-- Itera todos los `ModelObject`, stripea cualquier prefijo `[Ln]` existente del nombre
-- Re-codifica `[L{link_group_id}]` al inicio del nombre antes de la llamada
-- Restaura los nombres originales inmediatamente después
+**On save** (before `store_bbs_3mf`):
+- Strips any existing `[Ln]` prefix from each object's name
+- Re-encodes `[L{link_group_id}]` at the start of the name
+- Restores the original names immediately after the save call
 
-**Al cargar** (`rebuild_link_groups_from_model`):
-- Parsea prefijos `[Ln]` de los nombres de objetos
-- Stripea el prefijo y almacena el nombre limpio en el modelo
-- Setea `link_group_id` desde el prefijo (o lo mantiene si ya venía por metadatos Prusa)
-- `wxCallAfter` para diferir `refresh_link_names` hasta que todo el UI post-load haya terminado
+**On load** (`rebuild_link_groups_from_model`):
+- Parses `[Ln]` prefixes from object names
+- Strips the prefix and stores the clean name in the model
+- Sets `link_group_id` from the prefix (preserves existing value if already set by metadata)
+- `wxGetApp().CallAfter(...)` defers `refresh_link_names` until all post-load UI operations have settled
 
-**3mf.cpp** (formato Prusa, belt-and-suspenders):
-- `_add_model_config_file_to_archive`: también codifica `[Ln]` en el nombre + guarda `link_group_id` como metadata explícita
-- `_extract_model_config_from_archive`: parsea el nombre y `link_group_id` metadata
-
----
-
-## Bug 9 — Crash al arrancar (icono faltante)
-`page->new_optgroup(L("Neotko Interlayer Sanding"))` sin segundo parámetro de icono.
-Fix en `Tab.cpp`.
+**3mf.cpp** (Prusa format, belt-and-suspenders):
+- `_add_model_config_file_to_archive`: also encodes `[Ln]` in the name + saves `link_group_id` as explicit metadata
+- `_extract_model_config_from_archive`: parses both the name prefix and `link_group_id` metadata
 
 ---
 
-## Bug 10 — Objetos flotantes snapeados a Z=0
-Root cause en `GLCanvas3D.cpp`: `do_move()`, `do_rotate()`, `do_scale()` — bloque "fix flying instances" disparaba para TODOS los objetos.
-Fix: añadido `&& shift_z < 0.0` en 4 ubicaciones — solo corrige objetos hundidos, nunca flotantes.
-Defensa secundaria: `m_floating_z_guard` en `Plater::priv` con `wxCallAfter` para restaurar Z.
+## Bug 9 — Startup crash (missing icon parameter)
+`page->new_optgroup(L("Neotko Interlayer Sanding"))` called without the second icon parameter.
+Fixed in `Tab.cpp`.
 
 ---
 
-## Feature 11 — Indicadores visuales de Temporal Link en el listado
-
-- Prefijo `[L1]`, `[L2]`... en el listado de objetos, coloreado por grupo
-- Paleta de 5 colores (amber/sky-blue/purple/emerald/crimson), cíclica
-- Helpers: `link_group_color(int)` y `make_link_display_name(const ModelObject*)` en `GUI_ObjectList.cpp`
-- `wxRenderer::DrawItemText()` extendido: dibuja prefijo en color del grupo, resto en color normal
-- `ObjectList::refresh_link_names()` — itera objetos, aplica nombres prefijados, llama `Refresh()`
-- Hooks en `Plater.cpp`: `refresh_link_names()` tras link/break/rebuild
+## Bug 10 — Floating objects snapped to Z=0
+Root cause in `GLCanvas3D.cpp`: `do_move()`, `do_rotate()`, `do_scale()` — "fix flying instances" block was firing for ALL objects.
+Fix: added `&& shift_z < 0.0` at 4 locations — only corrects sinking objects, never floating ones.
+Secondary defense: `m_floating_z_guard` in `Plater::priv` with `wxCallAfter` Z restore.
 
 ---
 
-## Feature 12 — Copy/paste propaga el grupo completo
+## Feature 11 — Temporal Link visual indicators in object list
 
-**Comportamiento:** Copiar A (L1={A,B}) → pegar A_copy+B_copy en nuevo grupo L3. Copiar A+C (L1,L2) → dos nuevos grupos.
-
-**`Selection::copy_to_clipboard()`** — expande la selección para incluir todos los partners del grupo antes de copiar. Preserva `link_group_id` en objetos del portapapeles.
-
-**`Selection::paste_objects_from_clipboard()`** — tras `paste_objects_into_list()`, llama `plater()->regroup_pasted_link_objects(object_idxs)`.
-
-**`Plater::regroup_pasted_link_objects()`** — agrupa índices pegados por `link_group_id` original. 2+ miembros → nuevo `m_next_link_group_id++`. 1 miembro → limpia a 0. Llama `update_pre_move_snapshot()` + `refresh_link_names()`.
+- `[L1]`, `[L2]`... prefix in the object list, color-coded per group
+- 5-color palette (amber/sky-blue/purple/emerald/crimson), cycling
+- Helpers: `link_group_color(int)` and `make_link_display_name(const ModelObject*)` in `GUI_ObjectList.cpp`
+- `wxRenderer::DrawItemText()` extended: draws the prefix in group color, rest in normal color
+- `ObjectList::refresh_link_names()` — iterates objects, applies prefixed names, calls `Refresh()`
+- Hooks in `Plater.cpp`: `refresh_link_names()` called after link/break/rebuild
 
 ---
 
-## Feature 13 — Apply Process Preset a objetos seleccionados
+## Feature 12 — Copy/paste propagates full link group
+
+**Behavior:** Copy A (L1={A,B}) → paste A_copy+B_copy into new group L3. Copy A+C (L1,L2) → two new groups.
+
+**`Selection::copy_to_clipboard()`** — expands selection to include all link-group partners before copying. Preserves `link_group_id` in clipboard objects.
+
+**`Selection::paste_objects_from_clipboard()`** — after `paste_objects_into_list()`, calls `plater()->regroup_pasted_link_objects(object_idxs)`.
+
+**`Plater::regroup_pasted_link_objects()`** — groups pasted indices by original `link_group_id`. 2+ members → new `m_next_link_group_id++`. 1 member → cleared to 0. Calls `update_pre_move_snapshot()` + `refresh_link_names()`.
+
+---
+
+## Feature 13 — Apply Process Preset to selected objects
 
 ### UI (ParamsPanel.cpp/hpp)
-- `m_object_preset_btn` (ScalableButton, icono "save") en `m_mode_sizer`, junto a `m_tips_arrow`
+- `m_object_preset_btn` (ScalableButton, "save" icon) in `m_mode_sizer`, next to `m_tips_arrow`
 - Tooltip: "Apply a process preset to selected object(s)"
-- Click: muestra `wxSingleChoiceDialog` con **solo User Presets** (excluye system y default)
-- Llamada diferida con `wxGetApp().CallAfter(...)` para evitar crash al destruir el dialog
+- Click: shows `wxSingleChoiceDialog` with **User Presets only** (`!p.is_system && !p.is_default`)
+- Call deferred via `wxGetApp().CallAfter(...)` to avoid crash during dialog destruction
 
 ### Plater::apply_print_preset_to_selected_objects() (Plater.cpp/hpp)
-- Localiza el preset por nombre
-- Colecta `obj_idxs` de la selección actual
-- Aplica con `obj->config.apply_only(preset->config, safe_keys, true)`
-- `safe_keys` = `PrintObjectConfig().keys() + PrintRegionConfig().keys()` excluyendo keys multimaterial
-- Keys MM excluidas: `wall_filament`, `sparse_infill_filament`, `solid_infill_filament`, `support_filament`, `support_interface_filament`, `flush_into_*`, `mmu_*`, `wipe_*`, `role_based_wipe_speed`
-- Finaliza con `this->changed_objects(changed_idxs)`
+- Finds preset by name, collects `obj_idxs` from current selection
+- Applies with `obj->config.apply_only(preset->config, safe_keys, true)`
+- `safe_keys` = `PrintObjectConfig().keys() + PrintRegionConfig().keys()` excluding multi-material keys:
+  `wall_filament`, `sparse_infill_filament`, `solid_infill_filament`, `support_filament`, `support_interface_filament`, `flush_into_*`, `mmu_*`, `wipe_*`, `role_based_wipe_speed`
+- Finishes with `this->changed_objects(changed_idxs)`
 
 ---
 
-## Comandos de build
+## Build commands
 
 ```bash
-./build_release_macos.sh -x        # rebuild completo
+./build_release_macos.sh -x        # full rebuild
 ./build_release_macos.sh -s -x     # incremental (skip deps)
 ```
 
 ---
 
-## Estado por feature
+## Feature status
 
-| # | Feature | Estado |
+| # | Feature | Status |
 |---|---------|--------|
-| 3 | disable_bridge_infill | ✅ Completo |
-| 4 | Top/Bottom density UI | ✅ Completo |
-| 5 | Neotko Interlayer Sanding (superficie) | ✅ Completo |
-| 6 | Neotko Infill Interlayer Sanding | ✅ Completo |
-| 7 | STL origin preservation | ✅ Completo |
-| 8 | Temporal Link — núcleo | ✅ Completo |
-| 9 | Bug startup crash icono | ✅ Fixed |
-| 10 | Bug floating Z=0 snap | ✅ Fixed |
-| 11 | Temporal Link — indicadores visuales [Ln] | ✅ Completo |
-| 12 | Temporal Link — copy/paste propaga grupo | ✅ Completo |
-| 13 | Apply Process Preset a objetos | ✅ Completo (pendiente confirmar build actual) |
-| — | 3MF persistence de Temporal Link | ✅ Implementado (pendiente confirmar) |
-| — | MM keys excluidas del Apply Preset | ✅ Completo |
+| 3 | disable_bridge_infill | ✅ Complete |
+| 4 | Top/Bottom density UI | ✅ Complete |
+| 5 | Neotko Interlayer Sanding (surfaces) | ✅ Complete |
+| 6 | Neotko Infill Interlayer Sanding | ✅ Complete |
+| 7 | STL origin preservation (single + multi file) | ✅ Complete |
+| 8 | Temporal Link — core | ✅ Complete |
+| 9 | Bug startup crash missing icon | ✅ Fixed |
+| 10 | Bug floating objects snapped to Z=0 | ✅ Fixed |
+| 11 | Temporal Link — visual [Ln] indicators | ✅ Complete |
+| 12 | Temporal Link — copy/paste propagates group | ✅ Complete |
+| 13 | Apply Process Preset to objects (User Presets only, MM keys excluded) | ✅ Complete |
+| — | Temporal Link — 3MF persistence | ✅ Complete |
 
 ---
 
-## Notas técnicas clave
+## Key technical notes
 
-- `Preset::print_options()` ≠ keys válidas per-objeto. Usar `PrintObjectConfig().keys() + PrintRegionConfig().keys()`
-- `store_bbs_3mf` / `read_from_archive` están en el source tree de BBS, no en el patch set → persistencia de links vía nombre del objeto en `Plater.cpp`
-- `StaticBox*` no `wxPanel*` para paneles con `SetBackgroundColor()`
-- `wxGetApp().CallAfter(lambda)` en lugar de `wxCallAfter()` libre (requiere `<wx/app.h>` que no siempre está incluido)
-- `!p.is_system && !p.is_default` para filtrar solo User Presets
+- `Preset::print_options()` ≠ valid per-object keys. Use `PrintObjectConfig().keys() + PrintRegionConfig().keys()`
+- `store_bbs_3mf` / `read_from_archive` are in BBS source files outside the patch set → link persistence via object name encoding in `Plater.cpp`
+- Use `StaticBox*` not `wxPanel*` for panels using `SetBackgroundColor()`
+- Use `wxGetApp().CallAfter(lambda)` not free `wxCallAfter()` (which requires `<wx/app.h>` not always included)
+- `!p.is_system && !p.is_default` to filter User Presets only
+- The 0.5 mm STL origin threshold was replaced with exact `!= 0.0` check to avoid false negatives on assembly parts with bbox near origin
