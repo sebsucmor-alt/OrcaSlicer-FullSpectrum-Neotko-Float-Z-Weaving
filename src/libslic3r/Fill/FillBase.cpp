@@ -232,7 +232,8 @@ void Fill::_create_gap_fill(const Surface* surface, const FillParams& params, Ex
             ex.medial_axis(min, max, &polylines);
         }
 
-        if (!polylines.empty() && !is_bridge(params.extrusion_role)) {
+        // erInternalBridgeInfill is treated as sparse infill: allow gap fill.
+        if (!polylines.empty() && (!is_bridge(params.extrusion_role) || params.extrusion_role == erInternalBridgeInfill)) {
             polylines.erase(std::remove_if(polylines.begin(), polylines.end(),
                                            [&](const ThickPolyline& p) {
                 return p.length() < scale_(params.config->filter_out_gap_fill.value);
