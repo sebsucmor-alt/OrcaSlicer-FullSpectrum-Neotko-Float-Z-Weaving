@@ -19,459 +19,186 @@ If you find this fun or interesting! Give RatDoux a Coffee for his work
 
 THIS IS A 0.93 Quite and Dirty fork, with my Beta Neotko Weaving Idea and Specially a Link system to allow free Z objects without needing to make 'parts'. Also allows to use different layer height for the prime tower.
 
-All info documentation and changes listed:
+All info documentation and changes listed - Update v5
+- Working Link system and save/load
+- Working Select Uesr Process for any object, except Multimaterial tag to avoid mix options with Wipetower
+- All other stuff comment downbelow all documented
 
-# OrcaSlicer FullSpectrum — Complete Patch Reference
+- SORRY it's in **Spanish** (use a web translator, I can't keep all in both languages for me and online, it takes too much time sorry
 
-> **Recovery reference.** This document exhaustively describes every modification made to the OrcaSlicer source code. It is intended to allow resuming work from scratch if conversation context is lost.
-
----
-
-## Index
-
-1. [Modified files map](#1-modified-files-map)
-2. [Pre-existing patches in the codebase](#2-pre-existing-patches-in-the-codebase)
-3. [Feature: disable_bridge_infill](#3-feature-disable_bridge_infill)
-4. [Feature: top_surface_density and bottom_surface_density UI](#4-feature-top_surface_density-and-bottom_surface_density-ui)
-5. [Feature: Neotko Interlayer Sanding (surface)](#5-feature-neotko-interlayer-sanding-surface)
-6. [Feature: Neotko Infill Interlayer Sanding (infill)](#6-feature-neotko-infill-interlayer-sanding-infill)
-7. [Feature: STL file origin preservation](#7-feature-stl-file-origin-preservation)
-8. [Feature: Temporal Link](#8-feature-temporal-link)
-9. [Bug fixed: startup crash due to missing icon](#9-bug-fixed-startup-crash-due-to-missing-icon)
-10. [Bug fixed: floating objects snapped to Z=0 on move](#10-bug-fixed-floating-objects-snapped-to-z0-on-move)
+# OrcaSlicer FullSpectrum — Informe de Patches
+**Build:** Snapmaker FullSpectrum fork de OrcaSlicer 0.9.3
+**Última actualización:** 2026-03-08 (sesión 5)
 
 ---
 
-## 1. Modified files map
+## Estructura de ficheros modificados
 
-| File | Path | Features |
-|---|---|---|
-| PrintConfig.hpp | src/libslic3r/ | 3, 4, 5, 6 |
-| PrintConfig.cpp | src/libslic3r/ | 3, 4, 5, 6 |
-| PrintObject.cpp | src/libslic3r/ | 3 |
-| GCode.cpp | src/libslic3r/ | 3, 5, 6 |
-| FillBase.cpp | src/libslic3r/Fill/ | 4 (UI only, no fill logic changes) |
-| Preset.cpp | src/libslic3r/ | 3, 5, 6 |
-| Tab.cpp | src/slic3r/GUI/ | 3, 4, 5, 6, 9 |
-| Print.cpp | src/libslic3r/ | pre-existing |
-| Plater.cpp | src/slic3r/GUI/ | 7, 8 |
-| 3mf.cpp | src/libslic3r/Format/ | 8 |
-| Model.hpp | src/libslic3r/ | 8 |
-| Model.cpp | src/libslic3r/ | 8 |
-| GLCanvas3D.cpp | src/slic3r/GUI/ | 10 |
+```
+src/
+├── libslic3r/
+│   ├── PrintConfig.hpp/cpp    Features 3, 4, 5, 6
+│   ├── PrintObject.cpp        Feature 3
+│   ├── GCode.cpp              Features 3, 5, 6
+│   ├── Preset.cpp             Features 3, 5, 6
+│   ├── Print.cpp              Patches preexistentes
+│   ├── Model.hpp/cpp          Feature 8 (Temporal Link)
+│   ├── Fill/FillBase.cpp      Referencia
+│   └── Format/3mf.cpp         Feature 8 + 3MF persistence
+└── slic3r/GUI/
+    ├── Tab.cpp                Features 3, 4, 5, 6 + Bug 9
+    ├── Plater.hpp/cpp         Features 7, 8, 11, 12, 13
+    ├── GLCanvas3D.hpp/cpp     Bug 10
+    ├── GUI_ObjectList.hpp/cpp Feature 11
+    ├── Selection.hpp/cpp      Feature 12
+    ├── ParamsPanel.hpp/cpp    Feature 13
+    └── PresetComboBoxes.hpp/cpp  Referencia
+```
 
 ---
 
-## 2. Pre-existing patches in the codebase
+## Features implementadas
 
-These changes already existed in the fork **before** the work sessions began. Documented here to avoid confusion with new changes.
+### Feature 3 — disable_bridge_infill
+Enum `DisableBridgeInfill` con opciones: None, Partial, Full.
+Afecta a `PrintConfig.hpp/cpp`, `PrintObject.cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
 
-### Model.cpp — ensure_on_bed() disabled
+### Feature 4 — Top/Bottom Surface Density UI
+Controles de densidad de superficie superior/inferior en la UI de parámetros.
+Afecta a `PrintConfig.hpp/cpp`, `Tab.cpp`.
 
-```cpp
-void ModelObject::ensure_on_bed(bool allow_negative_z)
-{
-    return; // Disabled: do not auto-move objects to Z0
-    // ... rest of code untouched
-```
+### Feature 5 — Neotko Interlayer Sanding (superficie)
+Lijado intercapas para superficies externas (`erTopSolidInfill`).
+Afecta a `PrintConfig.hpp/cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
 
-Critical: prevents OrcaSlicer from repositioning objects to Z=0 automatically when loading or moving them.
+### Feature 6 — Neotko Infill Interlayer Sanding
+Lijado intercapas para relleno interno (`erInternalInfill`).
+Afecta a `PrintConfig.hpp/cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
 
-### PrintObject.cpp — Internal bridge reclassified as sparse infill
-
-Internal bridges (stInternalBridge) are treated as normal infill (stInternal). The second-pass internal bridge layer logic was removed.
-
-### Print.cpp — Prime tower height validation commented out + shortest_object_idx
-
-The validation that prevented mixed layer height configurations with prime tower was commented out. Tracking of shortest_object_idx was added.
-
-### GCode.cpp — Initial layer error commented out
-
-```cpp
-// COMMENT if (layers_to_print.size() == 1u) {
-// COMMENT     if (!hasextrusions)
-// COMMENT         throw Slic3r::SlicingError((L("One object has empty initial layer...")), object.id().id);
-// COMMENT }
-```
-
-Result: floating objects (not touching the bed) slice correctly, emitting only a Warning without blocking. Works together with ensure_on_bed() disabled and Bug 10 fix.
+### Feature 7 — STL file origin preservation
+Objetos cuyo centro XY supera 0.5 mm del origen mantienen su posición original al importar.
+Afecta a `Plater.cpp`.
 
 ---
 
-## 3. Feature: disable_bridge_infill
+## Feature 8 — Temporal Link (sistema completo)
 
-### What it does
-Adds a per-region option that allows external bridges, internal bridges, or both, to be printed using top surface infill settings instead of dedicated bridge parameters. The intervention is structural: it happens at the first step of the slicing pipeline.
+Agrupa objetos para movimiento XYZ conjunto sin afectar al slicing.
 
-### UI location
-Quality > Bridging > **Disable bridge infill**
+### Núcleo del sistema
+- `int link_group_id { 0 }` en `ModelObject` (`Model.hpp/cpp`), serializado en cereal + assign_copy
+- Runtime en `Plater::priv`: `m_link_groups`, `m_next_link_group_id`, `m_pre_move_offsets`, `m_syncing_links`, `m_floating_z_guard`
+- Funciones: `update_pre_move_snapshot()`, `rebuild_link_groups_from_model()`, `on_instance_moved_with_link_sync()`, `link_selected_objects()`, `break_link_selected_objects()`
+- Menú contextual: "Link Objects" / "Break Link"
+- Hooks: `EVT_GLCANVAS_INSTANCE_MOVED`, `DRAGGING_STARTED`, `update_after_undo_redo`, `load_model_objects`, `remove()`
 
-| Value | Behavior |
-|---|---|
-| Disabled | Normal bridges (default) |
-| External bridges only | External bridges use top surface settings |
-| Internal bridges only | Internal bridges use top surface settings |
-| All bridges | All bridges use top surface settings |
+### Persistencia en 3MF (Plater.cpp)
+Dado que `store_bbs_3mf` y `read_from_archive` son funciones BBS en ficheros fuera del patch set, la persistencia se implementa en Plater.cpp:
 
-### How it works
+**Al guardar** (`export_3mf` → antes de `store_bbs_3mf`):
+- Itera todos los `ModelObject`, stripea cualquier prefijo `[Ln]` existente del nombre
+- Re-codifica `[L{link_group_id}]` al inicio del nombre antes de la llamada
+- Restaura los nombres originales inmediatamente después
 
-In detect_surfaces_type(), stBottomBridge surfaces are reclassified as stTop when the corresponding bridge type is disabled. The entire downstream pipeline (fill pattern, speed, flow, fan) natively sees stTop and behaves accordingly.
+**Al cargar** (`rebuild_link_groups_from_model`):
+- Parsea prefijos `[Ln]` de los nombres de objetos
+- Stripea el prefijo y almacena el nombre limpio en el modelo
+- Setea `link_group_id` desde el prefijo (o lo mantiene si ya venía por metadatos Prusa)
+- `wxCallAfter` para diferir `refresh_link_names` hasta que todo el UI post-load haya terminado
 
-```
-detect_surfaces_type()
-    stBottomBridge -> stTop        (when external bridge disabled)
-         |
-process_external_surfaces()       -- sees stTop, treats as top surface
-         |
-FillBase                          -- uses top_surface_pattern automatically
-         |
-GCode.cpp                         -- emits erTopSolidInfill natively
-```
-
-### Modified files
-
-**PrintConfig.hpp**
-- Enum `DisableBridgeInfill { dbiDisabled, dbiExternalOnly, dbiInternalOnly, dbiAll }`
-- Key `disable_bridge_infill` (`ConfigOptionEnum<DisableBridgeInfill>`) in `PrintRegionConfig`
-
-**PrintConfig.cpp**
-- String map `s_keys_map_DisableBridgeInfill`
-- Full definition with label, tooltip and values
-
-**Tab.cpp**
-- UI line in Bridging group
-
-**Preset.cpp**
-- `"disable_bridge_infill"` in the preset key list
-
-**PrintObject.cpp — detect_surfaces_type() (~line 1336)**
-```cpp
-const bool ext_bridge_disabled =
-    this->printing_region(region_id).config().disable_bridge_infill.value == dbiExternalOnly ||
-    this->printing_region(region_id).config().disable_bridge_infill.value == dbiAll;
-SurfaceType surface_type_bottom_other = bottom_is_fully_supported ? stBottom :
-                                        ext_bridge_disabled        ? stTop    :
-                                                                     stBottomBridge;
-```
-
-The second external bridge layer pass is also skipped when bridges are disabled.
-
-**GCode.cpp**
-Only overrides for erInternalBridgeInfill (flow and speed) remain when dbiInternalOnly or dbiAll. External bridge overrides were removed — handled structurally.
+**3mf.cpp** (formato Prusa, belt-and-suspenders):
+- `_add_model_config_file_to_archive`: también codifica `[Ln]` en el nombre + guarda `link_group_id` como metadata explícita
+- `_extract_model_config_from_archive`: parsea el nombre y `link_group_id` metadata
 
 ---
 
-## 4. Feature: top_surface_density and bottom_surface_density UI
-
-### What it does
-Exposes two options in the UI that **already existed** fully implemented in the fill engine and OrcaSlicer preset system, but never had a UI line.
-
-- **top_surface_density** — top layer fill percentage (0-100%)
-- **bottom_surface_density** — bottom layer fill percentage (0-100%)
-
-No fill logic was modified. Only UI lines were added.
-
-### UI location
-Strength > Top/bottom shells
-
-### Modified files
-**Tab.cpp** only — two `add_option` lines in the Top/bottom shells group.
+## Bug 9 — Crash al arrancar (icono faltante)
+`page->new_optgroup(L("Neotko Interlayer Sanding"))` sin segundo parámetro de icono.
+Fix en `Tab.cpp`.
 
 ---
 
-## 5. Feature: Neotko Interlayer Sanding (surface)
-
-### What it does
-Oscillates the nozzle in Z during erTopSolidInfill extrusion. Adjacent passes move up and down in opposition, physically interleaving and creating a mechanical bond between lines. Improves top layer cohesion and reduces delamination.
-
-### UI location
-Quality > Neotko Interlayer Sanding
-
-| Parameter | Key | Default |
-|---|---|---|
-| Enable | interlayer_sanding_enabled | false |
-| Z amplitude | interlayer_sanding_amplitude | 0.10 mm |
-| Oscillation period | interlayer_sanding_period | 0 (auto = line width) |
-| Max Z speed | interlayer_sanding_max_z_speed | 20 mm/s |
-
-### How it works (GCode.cpp — _extrude())
-
-Feature activates only for erTopSolidInfill when sloped == nullptr.
-
-**Speed cap before the path:**
-```
-XY_speed_max = max_z_speed x period / (4 x amplitude)
-```
-
-**Line subdivision:** each segment is divided into at least 8 micro-segments per period. For each point, the Z offset of a triangular wave is computed:
-```
-phase = fmod(dist / period, 1.0) x 4
-z_offset = amplitude x phase          if phase < 1
-          = amplitude x (2 - phase)    if phase < 3
-          = amplitude x (phase - 4)    otherwise
-```
-
-**Restoration at path end:**
-1. travel_to_z(nominal_z) — returns nozzle to exact layer Z
-2. Restores original speed if it was capped
-
-### Modified files
-PrintConfig.hpp, PrintConfig.cpp, Tab.cpp, Preset.cpp, GCode.cpp
+## Bug 10 — Objetos flotantes snapeados a Z=0
+Root cause en `GLCanvas3D.cpp`: `do_move()`, `do_rotate()`, `do_scale()` — bloque "fix flying instances" disparaba para TODOS los objetos.
+Fix: añadido `&& shift_z < 0.0` en 4 ubicaciones — solo corrige objetos hundidos, nunca flotantes.
+Defensa secundaria: `m_floating_z_guard` en `Plater::priv` con `wxCallAfter` para restaurar Z.
 
 ---
 
-## 6. Feature: Neotko Infill Interlayer Sanding (infill)
+## Feature 11 — Indicadores visuales de Temporal Link en el listado
 
-### What it does
-Applies the same Z oscillation to **sparse infill** (erInternalInfill), improving mechanical bonding between infill layers throughout the full object height — not just the surface.
-
-Only affects erInternalInfill. Perimeters, solid infill, bridges and top surface are never affected.
-
-### UI location
-Strength > Neotko Infill Interlayer Sanding
-
-| Parameter | Key | Default |
-|---|---|---|
-| Enable | infill_interlayer_sanding_enabled | false |
-| Z amplitude | infill_interlayer_sanding_amplitude | 0.10 mm |
-| Oscillation period | infill_interlayer_sanding_period | 0 (auto = line width) |
-| Max Z speed | infill_interlayer_sanding_max_z_speed | 20 mm/s |
-
-### Modified files
-PrintConfig.hpp, PrintConfig.cpp, Tab.cpp, Preset.cpp, GCode.cpp
+- Prefijo `[L1]`, `[L2]`... en el listado de objetos, coloreado por grupo
+- Paleta de 5 colores (amber/sky-blue/purple/emerald/crimson), cíclica
+- Helpers: `link_group_color(int)` y `make_link_display_name(const ModelObject*)` en `GUI_ObjectList.cpp`
+- `wxRenderer::DrawItemText()` extendido: dibuja prefijo en color del grupo, resto en color normal
+- `ObjectList::refresh_link_names()` — itera objetos, aplica nombres prefijados, llama `Refresh()`
+- Hooks en `Plater.cpp`: `refresh_link_names()` tras link/break/rebuild
 
 ---
 
-## 7. Feature: STL file origin preservation
+## Feature 12 — Copy/paste propaga el grupo completo
 
-### What it does
-When loading an STL/3MF object that has a significant XY position (>0.5 mm from origin), OrcaSlicer preserves that position instead of relocating the object to the bed center.
+**Comportamiento:** Copiar A (L1={A,B}) → pegar A_copy+B_copy en nuevo grupo L3. Copiar A+C (L1,L2) → dos nuevos grupos.
 
-### How it works
+**`Selection::copy_to_clipboard()`** — expande la selección para incluir todos los partners del grupo antes de copiar. Preserva `link_group_id` en objetos del portapapeles.
 
-**Plater.cpp — load_model_objects()**
+**`Selection::paste_objects_from_clipboard()`** — tras `paste_objects_into_list()`, llama `plater()->regroup_pasted_link_objects(object_idxs)`.
 
-The AUTOPLACEMENT_ON_LOAD block is active. Before centering the mesh, the original bounding box is captured:
-```cpp
-const BoundingBoxf3 orig_bbox = object->raw_mesh_bounding_box();
-const Vec3d orig_center = orig_bbox.center();
-object->center_around_origin();
-ModelInstance* inst = object->add_instance();
-inst->set_offset(Vec3d(orig_center.x(), orig_center.y(), -object->origin_translation(2)));
-```
-
-For new instances without a file position:
-```cpp
-const bool has_file_position = (std::abs(offset(0)) > 0.5 || std::abs(offset(1)) > 0.5);
-if (has_file_position)
-    continue; // keep XY from file, Z was already set correctly above
-```
-
-SUPPORT_AUTOCENTER is never defined — the center_instances_around_point block in update() is dead code and does not interfere.
+**`Plater::regroup_pasted_link_objects()`** — agrupa índices pegados por `link_group_id` original. 2+ miembros → nuevo `m_next_link_group_id++`. 1 miembro → limpia a 0. Llama `update_pre_move_snapshot()` + `refresh_link_names()`.
 
 ---
 
-## 8. Feature: Temporal Link
+## Feature 13 — Apply Process Preset a objetos seleccionados
 
-### What it does
-Groups two or more objects so they move together without modifying the print structure (no "parts" created, no effect on slicing). Unlike Assemble, it operates entirely in the normal 3D view and has no effect on generated GCode.
+### UI (ParamsPanel.cpp/hpp)
+- `m_object_preset_btn` (ScalableButton, icono "save") en `m_mode_sizer`, junto a `m_tips_arrow`
+- Tooltip: "Apply a process preset to selected object(s)"
+- Click: muestra `wxSingleChoiceDialog` con **solo User Presets** (excluye system y default)
+- Llamada diferida con `wxGetApp().CallAfter(...)` para evitar crash al destruir el dialog
 
-Supports an **unlimited number of objects** in the same group. Multiple independent groups can coexist simultaneously.
-
-| | Assemble | Temporal Link |
-|---|---|---|
-| Affects slicing | YES | NO |
-| Own view | YES (AssembleView) | NO (normal 3D view) |
-| Undone with | Split | Break Link |
-| Persists in .3mf | YES | YES |
-
-### Usage
-1. Select 2 or more objects (Shift+click or area selection)
-2. Right-click > Link Objects
-3. Move any one > all move with the same XYZ delta
-4. To break: select any group member > right-click > Break Link
-
-### Delta architecture
-
-```
-DRAGGING_STARTED -> update_pre_move_snapshot()
-     |  (user drags object A — or edits XYZ in sidebar)
-INSTANCE_MOVED -> on_instance_moved_with_link_sync()
-     |  delta = A.current_offset - A.pre_move_offset
-     |  for each B in the same group (not selected):
-     |      B.set_offset(B.offset + delta)
-     +-> update_pre_move_snapshot()   <- new baseline
-     +-> update()
-```
-
-### Bugs fixed during development
-
-**Bug 1: Double-delta when moving multiple selected linked objects**
-
-When A and B are linked and both selected, the gizmo already moves both correctly. The original handler propagated A's delta to B (double-move) and B's corrupted delta back to A.
-
-Fix: build moved_obj_ids with all IDs in the selection. The propagation loop skips (continue) any object already in the selection — the gizmo moved it correctly. processed_groups ensures each group is only processed once per event.
-
-**Bug 2: Prime Tower fires INSTANCE_MOVED and corrupts positions**
-
-The Prime Tower is not a real ModelObject. Its GLVolume can return object_idx() values that alias real objects, producing an incoherent delta.
-
-Fix:
-```cpp
-if (sel.is_wipe_tower()) {
-    update_pre_move_snapshot();
-    update();
-    return;
-}
-```
-
-### New fields in priv (Plater.cpp)
-
-```cpp
-std::map<size_t, int>   m_link_groups;           // object id().id -> group_id
-int                     m_next_link_group_id{1};
-std::map<size_t, Vec3d> m_pre_move_offsets;      // pre-move position snapshot
-bool                    m_syncing_links{false};   // anti-recursion guard
-std::map<size_t, Vec3d> m_floating_z_guard;      // see Bug 10
-```
-
-### New functions in Plater.cpp
-
-- `update_pre_move_snapshot()` — XYZ snapshot of all objects; also populates m_floating_z_guard
-- `rebuild_link_groups_from_model()` — rebuilds runtime map from link_group_id fields
-- `on_instance_moved_with_link_sync()` — replaces the plain `{ update(); }` lambda for EVT_GLCANVAS_INSTANCE_MOVED
-- `link_selected_objects()` — assigns shared group_id, takes snapshot
-- `break_link_selected_objects()` — removes from group, takes snapshot
-
-### Event hooks
-
-- EVT_GLCANVAS_INSTANCE_MOVED -> on_instance_moved_with_link_sync()
-- on_3dcanvas_mouse_dragging_started -> update_pre_move_snapshot()
-- update_after_undo_redo -> rebuild_link_groups_from_model()
-- load_model_objects (end) -> rebuild_link_groups_from_model()
-- remove() -> erase from m_link_groups, m_pre_move_offsets, m_floating_z_guard
-
-### Model.hpp — field declaration + serialization
-
-```cpp
-int link_group_id { 0 };   // TEMPORAL LINK: 0 = no link; >0 = group id
-```
-
-Also added to cereal save() and load() methods (undo/redo):
-```cpp
-ar(..., cut_connectors, cut_id, link_group_id); // TEMPORAL LINK
-```
-
-### Model.cpp — propagation in copy/move
-
-```cpp
-this->link_group_id = rhs.link_group_id;  // in assign_copy (const& and &&)
-```
-
-### 3mf.cpp — persistence
-
-Export, import and valid_keys whitelist of link_group_id in model config metadata XML.
-
-### Known limitations
-- Scale and rotation are not propagated — only XYZ offset
-- Objects on different plates can be linked; delta propagates independently of plate
+### Plater::apply_print_preset_to_selected_objects() (Plater.cpp/hpp)
+- Localiza el preset por nombre
+- Colecta `obj_idxs` de la selección actual
+- Aplica con `obj->config.apply_only(preset->config, safe_keys, true)`
+- `safe_keys` = `PrintObjectConfig().keys() + PrintRegionConfig().keys()` excluyendo keys multimaterial
+- Keys MM excluidas: `wall_filament`, `sparse_infill_filament`, `solid_infill_filament`, `support_filament`, `support_interface_filament`, `flush_into_*`, `mmu_*`, `wipe_*`, `role_based_wipe_speed`
+- Finaliza con `this->changed_objects(changed_idxs)`
 
 ---
 
-## 9. Bug fixed: startup crash due to missing icon
+## Comandos de build
 
-### Symptom
-Compiled without errors but crashed on startup:
-```
-[trace] Initializing StaticPrintConfigs
-Unhandled unknown exception; terminating the application.
-zsh: segmentation fault  ./Snapmaker_Orca
-```
-
-### Cause
-The new new_optgroup calls in Tab.cpp used a second parameter with a non-existent icon name:
-```cpp
-// INCORRECT — unregistered icon -> runtime crash
-page->new_optgroup(L("Neotko Interlayer Sanding"),       L"param_interlayer_sanding");
-page->new_optgroup(L("Neotko Infill Interlayer Sanding"), L"param_infill_sanding");
-```
-
-### Fix
-```cpp
-page->new_optgroup(L("Neotko Interlayer Sanding"));
-page->new_optgroup(L("Neotko Infill Interlayer Sanding"));
-```
-
-### Build note
-After deleting the full build directory, dependencies must be rebuilt:
 ```bash
-./build_release_macos.sh -x        # no -s -> rebuilds deps
-```
-Subsequent incremental changes can use:
-```bash
-./build_release_macos.sh -s -x     # -s -> skip deps, project only
+./build_release_macos.sh -x        # rebuild completo
+./build_release_macos.sh -s -x     # incremental (skip deps)
 ```
 
 ---
 
-## 10. Bug fixed: floating objects snapped to Z=0 on move
+## Estado por feature
 
-### Symptom
-Moving any object (including the Prime Tower or any unrelated object) caused objects intentionally placed above the bed (floating) to be pulled down to Z=0. The behavior occurred both with and without Temporal Link active.
-
-### Root cause — GLCanvas3D.cpp
-
-The functions do_move(), do_rotate() and do_scale() all contain a "Fixes flying/sinking instances" block that iterates over **all objects in the scene** (not just selected ones) and applies:
-
-```cpp
-const double shift_z = m->get_instance_min_z(i.second);
-if ((current_printer_technology() == ptSLA || shift_z > SINKING_Z_THRESHOLD) && (shift_z != 0.0f)) {
-    const Vec3d shift(0.0, 0.0, -shift_z);
-    m->translate_instance(i.second, shift);  // snaps object to Z=0
-}
-```
-
-With SINKING_Z_THRESHOLD = -0.001f, the condition shift_z > SINKING_Z_THRESHOLD is true for **any object not sunken below the bed**, including intentionally floating ones. This code runs **before** EVT_GLCANVAS_INSTANCE_MOVED is fired, so any protection in Plater.cpp always arrived too late.
-
-### Fix — GLCanvas3D.cpp (4 locations)
-
-Add `&& shift_z < 0.0` to the FFF condition so it only corrects objects that are sinking below the bed, never intentionally floating ones:
-
-```cpp
-// do_move (~line 4756) — simple condition:
-if ((current_printer_technology() == ptSLA ||
-     (shift_z > SINKING_Z_THRESHOLD && shift_z < 0.0)) && (shift_z != 0.0f))
-
-// do_rotate (~line 4870) and do_scale (~lines 4956, 5060) — min_zs condition:
-if ((min_zs... >= SINKING_Z_THRESHOLD ||
-     (shift_z > SINKING_Z_THRESHOLD && shift_z < 0.0)) && (shift_z != 0.0f))
-```
-
-Resulting logic:
-- shift_z < -0.001 (sinking below bed): **corrected** — lifted to Z=0
-- shift_z = 0 (exactly on bed): **untouched** (condition != 0.0f)
-- shift_z > 0 (intentionally floating): **untouched** (shift_z < 0.0 fails)
-
-### Note on m_floating_z_guard in Plater.cpp
-
-During investigation of this bug, m_floating_z_guard was added to Plater::priv as a secondary protection system (persist canonical Z offsets + restore via wxCallAfter). Although the real fix is in GLCanvas3D.cpp, the guard remains as defense in depth against other potential reset paths that may exist in the fork.
+| # | Feature | Estado |
+|---|---------|--------|
+| 3 | disable_bridge_infill | ✅ Completo |
+| 4 | Top/Bottom density UI | ✅ Completo |
+| 5 | Neotko Interlayer Sanding (superficie) | ✅ Completo |
+| 6 | Neotko Infill Interlayer Sanding | ✅ Completo |
+| 7 | STL origin preservation | ✅ Completo |
+| 8 | Temporal Link — núcleo | ✅ Completo |
+| 9 | Bug startup crash icono | ✅ Fixed |
+| 10 | Bug floating Z=0 snap | ✅ Fixed |
+| 11 | Temporal Link — indicadores visuales [Ln] | ✅ Completo |
+| 12 | Temporal Link — copy/paste propaga grupo | ✅ Completo |
+| 13 | Apply Process Preset a objetos | ✅ Completo (pendiente confirmar build actual) |
+| — | 3MF persistence de Temporal Link | ✅ Implementado (pendiente confirmar) |
+| — | MM keys excluidas del Apply Preset | ✅ Completo |
 
 ---
 
-## Appendix — Output files status
+## Notas técnicas clave
 
-| File | Contains |
-|---|---|
-| PrintConfig.hpp | Features 3, 4, 5, 6 |
-| PrintConfig.cpp | Features 3, 4, 5, 6 |
-| PrintObject.cpp | Feature 3 |
-| GCode.cpp | Features 3, 5, 6 + pre-existing patch |
-| FillBase.cpp | No logic changes (reference only) |
-| Preset.cpp | Features 3, 5, 6 |
-| Tab.cpp | Features 3, 4, 5, 6 (bug 9 fixed) |
-| Plater.cpp | Features 7, 8 + m_floating_z_guard |
-| 3mf.cpp | Feature 8 |
-| Model.hpp | Feature 8 |
-| Model.cpp | Feature 8 |
-| GLCanvas3D.cpp | Bug 10 |
-| GLCanvas3D.hpp | No changes (included as reference) |
+- `Preset::print_options()` ≠ keys válidas per-objeto. Usar `PrintObjectConfig().keys() + PrintRegionConfig().keys()`
+- `store_bbs_3mf` / `read_from_archive` están en el source tree de BBS, no en el patch set → persistencia de links vía nombre del objeto en `Plater.cpp`
+- `StaticBox*` no `wxPanel*` para paneles con `SetBackgroundColor()`
+- `wxGetApp().CallAfter(lambda)` en lugar de `wxCallAfter()` libre (requiere `<wx/app.h>` que no siempre está incluido)
+- `!p.is_system && !p.is_default` para filtrar solo User Presets
