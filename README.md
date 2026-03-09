@@ -69,6 +69,46 @@ Affects `PrintConfig.hpp/cpp`, `Tab.cpp`.
 Inter-layer sanding for external surfaces (`erTopSolidInfill`).
 Affects `PrintConfig.hpp/cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
 
+DATA for this Feautre:
+
+### What it does
+Oscillates the nozzle in Z during erTopSolidInfill extrusion. Adjacent passes move up and down in opposition, physically interleaving and creating a mechanical bond between lines. Improves top layer cohesion and reduces delamination.
+
+### UI location
+Quality > Neotko Interlayer Sanding
+
+| Parameter | Key | Default |
+|---|---|---|
+| Enable | interlayer_sanding_enabled | false |
+| Z amplitude | interlayer_sanding_amplitude | 0.10 mm |
+| Oscillation period | interlayer_sanding_period | 0 (auto = line width) |
+| Max Z speed | interlayer_sanding_max_z_speed | 20 mm/s |
+
+### How it works (GCode.cpp — _extrude())
+
+Feature activates only for erTopSolidInfill when sloped == nullptr.
+
+**Speed cap before the path:**
+```
+XY_speed_max = max_z_speed x period / (4 x amplitude)
+```
+
+**Line subdivision:** each segment is divided into at least 8 micro-segments per period. For each point, the Z offset of a triangular wave is computed:
+```
+phase = fmod(dist / period, 1.0) x 4
+z_offset = amplitude x phase          if phase < 1
+          = amplitude x (2 - phase)    if phase < 3
+          = amplitude x (phase - 4)    otherwise
+```
+
+**Restoration at path end:**
+1. travel_to_z(nominal_z) — returns nozzle to exact layer Z
+2. Restores original speed if it was capped
+
+### Modified files
+PrintConfig.hpp, PrintConfig.cpp, Tab.cpp, Preset.cpp, GCode.cpp
+
+
 ### Feature 6 — Neotko Infill Interlayer Sanding
 Inter-layer sanding for internal infill (`erInternalInfill`).
 Affects `PrintConfig.hpp/cpp`, `GCode.cpp`, `Preset.cpp`, `Tab.cpp`.
