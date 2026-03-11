@@ -107,11 +107,26 @@ Polylines Fill::fill_surface(const Surface *surface, const FillParams &params)
     Slic3r::ExPolygons expp = offset_ex(surface->expolygon, float(scale_(this->overlap - 0.5 * this->spacing)));
     // Create the infills for each of the regions.
     Polylines polylines_out;
+    // ORCA FullSpectrum: compute fill direction once, then apply monotonic interleave
+    // half-spacing shift on odd layers if the feature is enabled.
+    auto fill_dir = _infill_direction(surface);
+    if (this->print_object_config != nullptr
+        && this->print_object_config->monotonic_interlayer_fill.value
+        && dynamic_cast<const FillMonotonic*>(this) != nullptr
+        && params.extrusion_role == erTopSolidInfill
+        && this->layer_id != size_t(-1) && (this->layer_id & 1u)) {
+        // Offset the grid anchor by half a line-spacing perpendicular to the fill angle
+        // so lines on this layer nest in the gaps left by the previous layer.
+        const coord_t half_sp = coord_t(scale_(this->spacing) * 0.5);
+        fill_dir.second += Point(
+            coord_t(-std::sin(fill_dir.first) * double(half_sp)),
+            coord_t( std::cos(fill_dir.first) * double(half_sp)));
+    }
     for (size_t i = 0; i < expp.size(); ++ i)
         _fill_surface_single(
             params,
             surface->thickness_layers,
-            _infill_direction(surface),
+            fill_dir,
             std::move(expp[i]),
             polylines_out);
     return polylines_out;
@@ -123,8 +138,20 @@ ThickPolylines Fill::fill_surface_arachne(const Surface* surface, const FillPara
     Slic3r::ExPolygons expp = offset_ex(surface->expolygon, float(scale_(this->overlap - 0.5 * this->spacing)));
     // Create the infills for each of the regions.
     ThickPolylines thick_polylines_out;
+    // ORCA FullSpectrum: same monotonic interleave shift for Arachne path
+    auto fill_dir_a = _infill_direction(surface);
+    if (this->print_object_config != nullptr
+        && this->print_object_config->monotonic_interlayer_fill.value
+        && dynamic_cast<const FillMonotonic*>(this) != nullptr
+        && params.extrusion_role == erTopSolidInfill
+        && this->layer_id != size_t(-1) && (this->layer_id & 1u)) {
+        const coord_t half_sp = coord_t(scale_(this->spacing) * 0.5);
+        fill_dir_a.second += Point(
+            coord_t(-std::sin(fill_dir_a.first) * double(half_sp)),
+            coord_t( std::cos(fill_dir_a.first) * double(half_sp)));
+    }
     for (ExPolygon& expoly : expp)
-        _fill_surface_single(params, surface->thickness_layers, _infill_direction(surface), std::move(expoly), thick_polylines_out);
+        _fill_surface_single(params, surface->thickness_layers, fill_dir_a, std::move(expoly), thick_polylines_out);
     return thick_polylines_out;
 }
 
@@ -308,7 +335,28 @@ std::pair<float, Point> Fill::_infill_direction(const Surface *surface) const
     } else if (this->layer_id != size_t(-1)) {
         // alternate fill direction
         //Orca: if template angle is not empty, don't apply layer angle
-        if(!is_using_template_angle) 
+        // ORCA FullSpectrum: when Neoweaving Linear is active, suppress per-layer angle
+        // rotation for stInternalSolid surfaces so the last solid infill layer beneath
+        // the top surface shares the exact same angle as the top surface layer.
+        // This is required for the Z zigzag to interdigitate correctly across the two layers.
+        // ORCA FullSpectrum: when Neoweaving Linear is active, suppress the per-layer
+        // angle rotation for stInternalSolid surfaces so the solid infill layer directly
+        // below the top surface shares the same fill angle as the top surface layer.
+        // This is required for Linear mode Z interdigitation to work correctly.
+        // We read the neoweave keys via option() to avoid adding a new config key,
+        // since interlayer_neoweave_* are PrintRegionConfig keys not in PrintObjectConfig.
+        bool neoweave_lock_angle = false;
+        if (this->print_object_config != nullptr && surface->surface_type == stInternalSolid) {
+            const ConfigOption* opt_en   = this->print_object_config->option("interlayer_neoweave_enabled");
+            const ConfigOption* opt_mode = this->print_object_config->option("interlayer_neoweave_mode");
+            if (opt_en && opt_en->getBool()) {
+                // NeoweaveMode::Linear == 1
+                const auto* mode_opt = dynamic_cast<const ConfigOptionEnumGeneric*>(opt_mode);
+                if (mode_opt && mode_opt->value == 1 /* Linear */)
+                    neoweave_lock_angle = true;
+            }
+        }
+        if(!is_using_template_angle && !neoweave_lock_angle)
             out_angle += this->_layer_angle(this->layer_id / surface->thickness_layers);
     } else {
 //    	printf("Layer_ID undefined!\n");
