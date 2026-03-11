@@ -18,6 +18,11 @@
 #include "libslic3r/Geometry/ConvexHull.hpp"
 
 #include <float.h>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <map>
+#include <zlib.h> // ORCA FullSpectrum: factory importer
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -226,6 +231,242 @@ Model Model::read_from_step(const std::string&                                  
 // BBS: add part plate related logic
 // BBS: backup & restore
 // Loading model from a file, it may be a simple geometry file as STL or OBJ, however it may be a project file as well.
+// ─── ORCA FullSpectrum: Simplify3D .factory importer ─────────────────────────
+//
+// Supports Simplify3D .factory format versions 4.x and 5.x.
+//
+// v5 format: contents.xml + Models/ModelN.stl + Processes/
+//   - contents.xml lists <model> entries with <path>, <source>, <modelName>, <groupName>, <transform>
+//   - transform is row-major 4x4; STL verts are in absolute world space; translation in t[3]/t[7]/t[11]
+//
+// v4 format: /Models/ModelN.stl + /Models/ModelN.info + /Processes/
+//   - .info is CSV: filename, filepath, groupName, translate (x,y,z), scale, rotate, rotMatrix
+//   - No contents.xml
+//
+// Naming: objects are named "[Ln] modelname" where n = group number from groupName field.
+// Each entry in S3D becomes an independent ModelObject (no OrcaSlicer linked instances).
+
+static uint32_t s3d_read_be32(const uint8_t* p) {
+    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+           (uint32_t(p[2]) <<  8) |  uint32_t(p[3]);
+}
+
+static std::string s3d_utf16be_to_utf8(const uint8_t* p, size_t byte_len) {
+    std::string out; out.reserve(byte_len / 2);
+    for (size_t i = 0; i + 1 < byte_len; i += 2) {
+        uint16_t cp = (uint16_t(p[i]) << 8) | p[i+1];
+        if      (cp < 0x80)  { out += char(cp); }
+        else if (cp < 0x800) { out += char(0xC0|(cp>>6)); out += char(0x80|(cp&0x3F)); }
+        else                 { out += char(0xE0|(cp>>12)); out += char(0x80|((cp>>6)&0x3F)); out += char(0x80|(cp&0x3F)); }
+    }
+    return out;
+}
+
+static std::vector<uint8_t> s3d_decompress(const uint8_t* src, size_t src_len, size_t hint) {
+    std::vector<uint8_t> out;
+    uLongf dest_len = (uLongf)(hint > 0 ? hint : src_len * 4);
+    out.resize(dest_len);
+    int ret = uncompress(out.data(), &dest_len, src, (uLong)src_len);
+    if (ret == Z_BUF_ERROR) { dest_len *= 2; out.resize(dest_len); ret = uncompress(out.data(), &dest_len, src, (uLong)src_len); }
+    if (ret != Z_OK) throw std::runtime_error("s3d_decompress: " + std::to_string(ret));
+    out.resize(dest_len); return out;
+}
+
+static std::string s3d_xml_tag(const std::string& block, const std::string& tag) {
+    std::string open = "<" + tag + ">", close = "</" + tag + ">";
+    auto s = block.find(open); if (s == std::string::npos) return "";
+    s += open.size();
+    auto e = block.find(close, s); if (e == std::string::npos) return "";
+    return block.substr(s, e - s);
+}
+
+// Extract group number from "Group 1" → 1, "Group 2" → 2, etc.
+static int s3d_group_number(const std::string& group_name) {
+    if (group_name.empty()) return 1;
+    for (int i = (int)group_name.size() - 1; i >= 0; --i) {
+        if (std::isdigit((unsigned char)group_name[i])) {
+            int j = i;
+            while (j > 0 && std::isdigit((unsigned char)group_name[j-1])) --j;
+            try { return std::stoi(group_name.substr(j, i - j + 1)); } catch (...) {}
+        }
+    }
+    return 1;
+}
+
+// Build indexed_triangle_set from binary STL bytes (in-memory, vertex dedup via exact key)
+static bool s3d_parse_stl(const std::vector<uint8_t>& stl, indexed_triangle_set& its) {
+    if (stl.size() < 84) return false;
+    uint32_t tri_count = 0;
+    std::memcpy(&tri_count, stl.data() + 80, 4);
+    if (stl.size() < 84 + (size_t)tri_count * 50) return false;
+    its.vertices.reserve(tri_count);
+    its.indices.reserve(tri_count);
+    using VKey = std::tuple<uint32_t,uint32_t,uint32_t>;
+    std::map<VKey,int> vmap;
+    auto get_v = [&](float x, float y, float z) -> int {
+        uint32_t bx,by,bz;
+        std::memcpy(&bx,&x,4); std::memcpy(&by,&y,4); std::memcpy(&bz,&z,4);
+        VKey k{bx,by,bz}; auto it = vmap.find(k);
+        if (it != vmap.end()) return it->second;
+        int idx = (int)its.vertices.size();
+        its.vertices.push_back(Vec3f(x,y,z)); vmap[k]=idx; return idx;
+    };
+    for (uint32_t i = 0; i < tri_count; ++i) {
+        const uint8_t* tri = stl.data() + 84 + i * 50;
+        float vx[3][3];
+        for (int v = 0; v < 3; ++v) std::memcpy(vx[v], tri + 12 + v*12, 12);
+        int i0=get_v(vx[0][0],vx[0][1],vx[0][2]);
+        int i1=get_v(vx[1][0],vx[1][1],vx[1][2]);
+        int i2=get_v(vx[2][0],vx[2][1],vx[2][2]);
+        if (i0!=i1 && i1!=i2 && i0!=i2) its.indices.push_back(Vec3i32(i0,i1,i2));
+    }
+    return !its.indices.empty();
+}
+
+// Add one object to model from an ITS + name + group (no translation — STL is in world space)
+static void s3d_add_object(Model* model, indexed_triangle_set&& its,
+                           const std::string& name, const std::string& group_name,
+                           const char* input_file)
+{
+    TriangleMesh mesh(std::move(its));
+    int gn = s3d_group_number(group_name);
+    std::string obj_name = "[L" + std::to_string(gn) + "] " + name;
+    ModelObject* obj = model->add_object();
+    obj->name = obj_name;
+    obj->input_file = input_file;
+    ModelVolume* vol = obj->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
+    vol->name = name;
+    obj->add_instance();
+}
+
+// ── v5 loader (contents.xml based) ──────────────────────────────────────────
+static int s3d_load_v5(const std::unordered_map<std::string,std::vector<uint8_t>>& entries,
+                       Model* model, const char* input_file, std::ofstream& dbg)
+{
+    auto it_xml = entries.find("contents.xml");
+    if (it_xml == entries.end()) { dbg << "v5: no contents.xml" << std::endl; return 0; }
+    std::string xml(it_xml->second.begin(), it_xml->second.end());
+
+    int loaded = 0;
+    const std::string otag = "<model>", ctag = "</model>";
+    size_t xp = 0;
+    while (true) {
+        auto s = xml.find(otag, xp); if (s == std::string::npos) break;
+        auto e = xml.find(ctag, s);  if (e == std::string::npos) break;
+        std::string blk = xml.substr(s + otag.size(), e - s - otag.size());
+        xp = e + ctag.size();
+
+        std::string path  = s3d_xml_tag(blk, "path");
+        std::string name  = s3d_xml_tag(blk, "modelName");
+        std::string group = s3d_xml_tag(blk, "groupName");
+        if (path.empty()) continue;
+
+        auto it = entries.find(path);
+        if (it == entries.end()) { dbg << "  v5 STL not found: " << path << std::endl; continue; }
+
+        if (name.empty()) name = boost::filesystem::path(path).stem().string();
+
+        indexed_triangle_set its;
+        if (!s3d_parse_stl(it->second, its)) { dbg << "  v5 parse failed: " << name << std::endl; continue; }
+
+        dbg << "  v5 [" << name << "] group=[" << group << "] tris=" << its.indices.size() << std::endl;
+        s3d_add_object(model, std::move(its), name, group, input_file);
+        ++loaded;
+    }
+    return loaded;
+}
+
+// ── v4 loader (.info based) ──────────────────────────────────────────────────
+static int s3d_load_v4(const std::unordered_map<std::string,std::vector<uint8_t>>& entries,
+                       Model* model, const char* input_file, std::ofstream& dbg)
+{
+    int loaded = 0;
+    for (const auto& kv : entries) {
+        const std::string& entry_name = kv.first;
+        // Look for .info files
+        if (entry_name.size() < 5 || entry_name.substr(entry_name.size()-5) != ".info") continue;
+        // Find corresponding .stl
+        std::string stl_path = entry_name.substr(0, entry_name.size()-5) + ".stl";
+        auto it_stl = entries.find(stl_path);
+        if (it_stl == entries.end()) { dbg << "  v4 STL not found for: " << entry_name << std::endl; continue; }
+
+        // Parse .info (CSV format)
+        std::string info_str(kv.second.begin(), kv.second.end());
+        std::string obj_name, group_name;
+        // Parse line by line: key,value
+        std::istringstream iss(info_str);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (line.empty()) continue;
+            auto comma = line.find(',');
+            if (comma == std::string::npos) continue;
+            std::string key = line.substr(0, comma);
+            std::string val = line.substr(comma + 1);
+            // Trim whitespace/CR
+            while (!val.empty() && (val.back()=='\r'||val.back()=='\n'||val.back()==' ')) val.pop_back();
+            if      (key == "filename")  obj_name   = val;
+            else if (key == "groupName") group_name = val;
+        }
+        if (obj_name.empty()) obj_name = boost::filesystem::path(stl_path).stem().string();
+
+        indexed_triangle_set its;
+        if (!s3d_parse_stl(it_stl->second, its)) { dbg << "  v4 parse failed: " << obj_name << std::endl; continue; }
+
+        dbg << "  v4 [" << obj_name << "] group=[" << group_name << "] tris=" << its.indices.size() << std::endl;
+        s3d_add_object(model, std::move(its), obj_name, group_name, input_file);
+        ++loaded;
+    }
+    return loaded;
+}
+
+static bool load_simplify3d_factory(const char* path_cstr, Model* model) {
+    std::ofstream dbg("/tmp/factory_debug.txt", std::ios::app);
+    dbg << "=== load_simplify3d_factory ===" << std::endl;
+
+    std::ifstream f(path_cstr, std::ios::binary);
+    if (!f.is_open()) { dbg << "cannot open" << std::endl; return false; }
+    std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    dbg << "file size=" << data.size() << std::endl;
+
+    // Parse container entries
+    std::unordered_map<std::string, std::vector<uint8_t>> entries;
+    size_t pos = 0;
+    while (pos + 4 <= data.size()) {
+        uint32_t nb = s3d_read_be32(data.data() + pos); pos += 4;
+        if (nb == 0 || pos + nb > data.size()) break;
+        std::string name = s3d_utf16be_to_utf8(data.data() + pos, nb); pos += nb;
+        if (pos + 4 > data.size()) break;
+        uint32_t cl = s3d_read_be32(data.data() + pos); pos += 4;
+        if (pos + cl > data.size()) break;
+        const uint8_t* cp = data.data() + pos; pos += cl;
+        if (cl < 4) continue;
+        uint32_t uncmp = s3d_read_be32(cp);
+        // Normalise name: strip leading '/'
+        if (!name.empty() && name[0] == '/') name = name.substr(1);
+        try {
+            entries[name] = s3d_decompress(cp + 4, cl - 4, uncmp);
+        } catch (const std::exception& e) {
+            dbg << "  [" << name << "] decompress FAILED: " << e.what() << std::endl;
+        }
+    }
+    dbg << "entries: " << entries.size() << std::endl;
+    if (entries.empty()) return false;
+
+    // Detect version
+    bool has_contents_xml = (entries.count("contents.xml") > 0);
+    dbg << "format: " << (has_contents_xml ? "v5 (contents.xml)" : "v4 (.info files)") << std::endl;
+
+    int loaded = has_contents_xml
+        ? s3d_load_v5(entries, model, path_cstr, dbg)
+        : s3d_load_v4(entries, model, path_cstr, dbg);
+
+    dbg << "total loaded: " << loaded << std::endl;
+    return loaded > 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 Model Model::read_from_file(const std::string&                                  input_file,
                             DynamicPrintConfig*                                 config,
                             ConfigSubstitutionContext*                          config_substitutions,
@@ -321,6 +562,8 @@ Model Model::read_from_file(const std::string&                                  
         delete_temp_file(temp_stl);
     }
 #endif
+    else if (boost::algorithm::iends_with(input_file, ".factory"))
+        result = load_simplify3d_factory(input_file.c_str(), &model); // ORCA FullSpectrum
     else
         throw Slic3r::RuntimeError(_L("Unknown file format. Input file must have .stl, .obj, .amf(.xml) extension."));
 

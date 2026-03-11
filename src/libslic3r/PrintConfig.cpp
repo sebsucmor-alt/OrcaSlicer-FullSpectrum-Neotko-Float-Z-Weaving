@@ -142,6 +142,19 @@ static t_config_enum_values s_keys_map_FuzzySkinMode {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinMode)
 
+static t_config_enum_values s_keys_map_NeoweaveMode {
+    { "wave",   int(NeoweaveMode::Wave)   },
+    { "linear", int(NeoweaveMode::Linear) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NeoweaveMode)
+
+static t_config_enum_values s_keys_map_InfillNeoweaveOverride {
+    { "inherit", int(InfillNeoweaveOverride::Inherit) },
+    { "enable",  int(InfillNeoweaveOverride::Enable)  },
+    { "disable", int(InfillNeoweaveOverride::Disable) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillNeoweaveOverride)
+
 static t_config_enum_values s_keys_map_InfillPattern {
     { "monotonic", ipMonotonic },
     { "monotonicline", ipMonotonicLine },
@@ -955,6 +968,19 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Nowhere"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<GapFillTarget>(gftNowhere));
+
+    def = this->add("monotonic_interlayer_fill", coBool);
+    def->label = L("Monotonic interlayer nesting");
+    def->category = L("Quality");
+    def->tooltip = L("Only active when Top surface pattern is set to Monotonic.\n\n"
+                     "Offsets the top-surface monotonic fill lines by half a line-spacing on "
+                     "alternating layers. Layer N lines fall into the gaps left by layer N-1, "
+                     "physically interlocking adjacent shells and improving top-surface cohesion.\n\n"
+                     "Most effective at top-surface densities below 100% (e.g. 50-80%). "
+                     "Requires that both the current and previous top-surface layer share the "
+                     "same fill angle — disable angle rotation for best results.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("enable_overhang_bridge_fan", coBools);
     def->label = L("Force cooling for overhangs and bridges");
@@ -5747,9 +5773,9 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(100));
 
-    // Neotko Interlayer Sanding
-    def = this->add("interlayer_sanding_enabled", coBool);
-    def->label = L("Enable Neotko Interlayer Sanding");
+    // Neotko Neoweaving
+    def = this->add("interlayer_neoweave_enabled", coBool);
+    def->label = L("Enable Neotko Neoweaving");
     def->category = L("Quality");
     def->tooltip = L("Oscillates the nozzle in Z while printing top surface infill lines, creating an "
                      "interlaced pattern that mechanically bonds adjacent passes. This improves top "
@@ -5761,8 +5787,39 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
-    def = this->add("interlayer_sanding_amplitude", coFloat);
-    def->label = L("Sanding Z amplitude");
+    def = this->add("interlayer_neoweave_mode", coEnum);
+    def->label = L("Neoweave mode");
+    def->category = L("Quality");
+    def->tooltip = L("Wave: the nozzle follows a continuous triangular-wave Z oscillation along the "
+                     "entire top-surface path. Original mode — smoothest interleave between adjacent lines.\n\n"
+                     "Linear: each individual top-surface line is treated as a unit. The nozzle ramps "
+                     "linearly from -amplitude at the start to +amplitude at the end (alternating direction "
+                     "on every line). Adjacent lines lean in opposite directions and physically interlock "
+                     "at their cross-section.\n\n"
+                     "Pair Linear mode with Minimum line length to skip short fill lines at object edges.");
+    def->enum_keys_map = &ConfigOptionEnum<NeoweaveMode>::get_enum_values();
+    def->enum_values.push_back("wave");
+    def->enum_values.push_back("linear");
+    def->enum_labels.push_back(L("Wave (continuous)"));
+    def->enum_labels.push_back(L("Linear (per-line ramp)"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<NeoweaveMode>(NeoweaveMode::Wave));
+
+    def = this->add("interlayer_neoweave_min_length", coFloat);
+    def->label = L("Minimum line length for linear neoweave");
+    def->category = L("Quality");
+    def->tooltip = L("Linear neoweave mode only. Lines shorter than this threshold are printed at "
+                     "nominal layer Z without any Z ramp. Prevents the oscillation from being applied "
+                     "to short fill-in lines at edges and corners where it would have no bonding effect.\n\n"
+                     "Set to 0 to apply to all lines. 3-5 mm is a good starting point.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 50.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(3.0));
+
+    def = this->add("interlayer_neoweave_amplitude", coFloat);
+    def->label = L("Neoweave Z amplitude");
     def->category = L("Quality");
     def->tooltip = L("How far the nozzle moves up and down in Z during each oscillation cycle. "
                      "Typical values are 0.05–0.2 mm. Values larger than half the layer height "
@@ -5776,8 +5833,8 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.1));
 
-    def = this->add("interlayer_sanding_period", coFloat);
-    def->label = L("Sanding oscillation period");
+    def = this->add("interlayer_neoweave_period", coFloat);
+    def->label = L("Neoweave oscillation period");
     def->category = L("Quality");
     def->tooltip = L("Distance along the extrusion path for one complete Z oscillation cycle (up and back down). "
                      "Setting this to 0 uses the top surface line width automatically, which produces exactly "
@@ -5789,10 +5846,10 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
-    def = this->add("interlayer_sanding_max_z_speed", coFloat);
-    def->label = L("Max Z speed for sanding");
+    def = this->add("interlayer_neoweave_max_z_speed", coFloat);
+    def->label = L("Neoweave max Z speed");
     def->category = L("Quality");
-    def->tooltip = L("Maximum speed at which the Z axis moves during interlayer sanding oscillations. "
+    def->tooltip = L("Maximum speed at which the Z axis moves during neoweaving oscillations. "
                      "The XY print speed is automatically reduced so that this limit is never exceeded, "
                      "preventing missed steps or artefacts on machines with a slower Z motor.\n\n"
                      "Set this to match your printer's maximum reliable Z speed. On Klipper machines "
@@ -5804,23 +5861,30 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(20.));
 
-    // Neotko Infill Interlayer Sanding
-    def = this->add("infill_sanding_enabled", coBool);
-    def->label = L("Enable Neotko Infill Interlayer Sanding");
+    // Neotko Infill Neoweaving
+    def = this->add("infill_neoweave_enabled", coEnum);
+    def->label = L("Infill Neoweaving");
     def->category = L("Strength");
-    def->tooltip = L("Oscillates the nozzle in Z while printing sparse infill lines. "
-                     "This increases the mechanical interlayer bond of the infill structure "
-                     "by interleaving adjacent passes vertically, improving part strength in Z "
-                     "without changing density or pattern.\n\n"
-                     "Only affects erInternalInfill paths (sparse infill). "
-                     "Perimeters (inner and outer walls) and solid infill are never affected.\n\n"
-                     "NOTE: Requires a printer with a fast Z axis (CoreXZ, CoreXZY, or equivalent). "
-                     "On slow Z-axis printers the XY speed will be automatically capped.");
+    def->tooltip = L("Controls Neotko Infill Neoweaving for this object.\n\n"
+                     "Inherit: use the global preset setting.\n"
+                     "Enable: force-enable for this object, even if the global preset has it off.\n"
+                     "Disable: force-disable for this object, even if the global preset has it on.\n\n"
+                     "Oscillates the nozzle in Z while printing sparse infill lines to interleave "
+                     "adjacent passes vertically, improving part strength in Z.\n\n"
+                     "Only affects erInternalInfill paths. Perimeters and solid infill are never affected.\n\n"
+                     "NOTE: Requires a printer with a fast Z axis (CoreXZ, CoreXZY, or equivalent).");
+    def->enum_keys_map = &ConfigOptionEnum<InfillNeoweaveOverride>::get_enum_values();
+    def->enum_values.push_back("inherit");
+    def->enum_values.push_back("enable");
+    def->enum_values.push_back("disable");
+    def->enum_labels.push_back(L("Inherit from preset"));
+    def->enum_labels.push_back(L("Enable"));
+    def->enum_labels.push_back(L("Disable"));
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionEnum<InfillNeoweaveOverride>(InfillNeoweaveOverride::Inherit));
 
-    def = this->add("infill_sanding_amplitude", coFloat);
-    def->label = L("Infill sanding Z amplitude");
+    def = this->add("infill_neoweave_amplitude", coFloat);
+    def->label = L("Infill neoweave Z amplitude");
     def->category = L("Strength");
     def->tooltip = L("How far the nozzle moves up and down in Z during each infill oscillation cycle. "
                      "Typical values are 0.05–0.3 mm. Values larger than half the layer height "
@@ -5832,8 +5896,8 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.1));
 
-    def = this->add("infill_sanding_period", coFloat);
-    def->label = L("Infill sanding oscillation period");
+    def = this->add("infill_neoweave_period", coFloat);
+    def->label = L("Infill neoweave oscillation period");
     def->category = L("Strength");
     def->tooltip = L("Distance along the infill path for one complete Z oscillation cycle. "
                      "Setting this to 0 uses the sparse infill line width automatically, "
@@ -5845,10 +5909,10 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
-    def = this->add("infill_sanding_max_z_speed", coFloat);
-    def->label = L("Max Z speed for infill sanding");
+    def = this->add("infill_neoweave_max_z_speed", coFloat);
+    def->label = L("Infill neoweave max Z speed");
     def->category = L("Strength");
-    def->tooltip = L("Maximum speed at which the Z axis moves during infill sanding oscillations. "
+    def->tooltip = L("Maximum speed at which the Z axis moves during infill neoweaving oscillations. "
                      "The XY sparse infill speed is automatically reduced to stay within this limit, "
                      "preventing missed steps on machines with a slower Z motor.\n\n"
                      "On Klipper machines, max_z_velocity in printer.cfg provides an additional "

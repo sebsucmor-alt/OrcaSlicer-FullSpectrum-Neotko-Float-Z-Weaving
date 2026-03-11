@@ -29,6 +29,22 @@
 
 namespace Slic3r {
 
+// Neotko Neoweaving mode
+enum class NeoweaveMode {
+    Wave,    // continuous triangular-wave oscillation along the path (original)
+    Linear   // per-line linear ramp: each line tilts from -amp to +amp (alternating)
+};
+
+// Three-state override for infill neoweaving per-object:
+//   Inherit = use the global infill_neoweave_enabled bool from the print config
+//   Enable  = force-enable regardless of global setting
+//   Disable = force-disable regardless of global setting
+enum class InfillNeoweaveOverride {
+    Inherit,
+    Enable,
+    Disable
+};
+
 enum GCodeFlavor : unsigned char {
     gcfMarlinLegacy, gcfKlipper, gcfRepRapFirmware, gcfMarlinFirmware, gcfRepRapSprinter, gcfRepetier, gcfTeacup, gcfMakerWare, gcfSailfish, gcfMach3, gcfMachinekit,
     gcfSmoothie, gcfNoExtrusion
@@ -929,6 +945,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,              tree_support_branch_diameter_organic))
     ((ConfigOptionFloat,              tree_support_branch_angle_organic))
     ((ConfigOptionEnum<GapFillTarget>,gap_fill_target))
+    // Neotko Monotonic Interlayer Fill: offset top-surface monotonic lines by
+    // half a line spacing on alternating layers so they nest in the gaps of the
+    // previous layer.  Only active when top_surface_pattern == ipMonotonic.
+    ((ConfigOptionBool, monotonic_interlayer_fill))
     ((ConfigOptionFloat,              min_length_factor))
 
     // Move all acceleration and jerk settings to object
@@ -961,7 +981,6 @@ PRINT_CONFIG_CLASS_DEFINE(
 
     // Orca: internal use only
     ((ConfigOptionBool,  calib_flowrate_topinfill_special_order)) // ORCA: special flag for flow rate calibration
-
 
 )
 
@@ -1051,16 +1070,18 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
     ((ConfigOptionFloat, top_surface_speed))
-    // Neotko Interlayer Sanding
-    ((ConfigOptionBool,  interlayer_sanding_enabled))
-    ((ConfigOptionFloat, interlayer_sanding_amplitude))
-    ((ConfigOptionFloat, interlayer_sanding_period))
-    ((ConfigOptionFloat, interlayer_sanding_max_z_speed))
-    // Neotko Infill Interlayer Sanding
-    ((ConfigOptionBool,  infill_sanding_enabled))
-    ((ConfigOptionFloat, infill_sanding_amplitude))
-    ((ConfigOptionFloat, infill_sanding_period))
-    ((ConfigOptionFloat, infill_sanding_max_z_speed))
+    // Neotko Neoweaving
+    ((ConfigOptionBool,                   interlayer_neoweave_enabled))
+    ((ConfigOptionEnum<NeoweaveMode>, interlayer_neoweave_mode))
+    ((ConfigOptionFloat,                  interlayer_neoweave_amplitude))
+    ((ConfigOptionFloat,                  interlayer_neoweave_period))
+    ((ConfigOptionFloat,                  interlayer_neoweave_max_z_speed))
+    ((ConfigOptionFloat,                  interlayer_neoweave_min_length))
+    // Neotko Infill Neoweaving
+    ((ConfigOptionEnum<InfillNeoweaveOverride>, infill_neoweave_enabled))
+    ((ConfigOptionFloat, infill_neoweave_amplitude))
+    ((ConfigOptionFloat, infill_neoweave_period))
+    ((ConfigOptionFloat, infill_neoweave_max_z_speed))
     //BBS
     ((ConfigOptionBool,                 enable_overhang_speed))
     ((ConfigOptionFloatOrPercent,       overhang_1_4_speed))

@@ -6870,56 +6870,83 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             }
             // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
             // Attention: G2 and G3 is not supported in spiral_mode mode
-            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr) {
+            // ORCA FullSpectrum: also force G1 when neoweaving is active — arc moves cannot
+            // carry per-line Z offsets, so we must use the straight-line path.
+            const bool weave_enabled_pre = m_config.interlayer_neoweave_enabled.value
+                                           && sloped == nullptr;
+            const bool weave_linear_pre  = weave_enabled_pre
+                && m_config.interlayer_neoweave_mode.value == NeoweaveMode::Linear;
+            const bool weave_active_pre  = weave_enabled_pre
+                && (path.role() == erTopSolidInfill
+                    || (weave_linear_pre && path.role() == erSolidInfill));
+            const bool infill_weave_active_pre =
+                (m_config.infill_neoweave_enabled.value == InfillNeoweaveOverride::Enable)
+                && path.role() == erInternalInfill;
+            const bool any_neoweave = weave_active_pre || infill_weave_active_pre;
+
+            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || any_neoweave) {
                 double path_length  = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
 
-                // ── Neotko Interlayer Sanding ─────────────────────────────────────────────
+                // ── Neotko Neoweaving ─────────────────────────────────────────────
                 // For erTopSolidInfill paths, subdivide every line into micro-segments and
                 // add a triangular-wave Z oscillation so adjacent passes interleave.
-                const bool sanding_active = m_config.interlayer_sanding_enabled.value
-                                            && path.role() == erTopSolidInfill
-                                            && sloped == nullptr;
+                // Neoweave applies to erTopSolidInfill always.
+                // When Linear mode is active it also applies to erSolidInfill so
+                // the last solid infill layer beneath the top surface can interdigitate with it.
+                const bool weave_enabled = weave_enabled_pre;
+                const bool weave_linear  = weave_linear_pre;
+                const bool weave_active  = weave_active_pre;
+                const double weave_min_length = m_config.interlayer_neoweave_min_length.value;
 
-                // Neotko Infill Interlayer Sanding — independent params for sparse infill only.
+                // Neotko Infill Neoweaving — independent params for sparse infill only.
                 // Perimeters (erPerimeter, erExternalPerimeter) and solid infill are never affected.
-                const bool infill_sanding_active = m_config.infill_sanding_enabled.value
-                                                   && path.role() == erInternalInfill
-                                                   && sloped == nullptr;
+                // infill_neoweave_enabled is a tristate enum:
+                //   Inherit = off (no explicit per-object override)
+                //   Enable  = force on for this object
+                //   Disable = force off for this object
+                const bool infill_weave_active =
+                    (m_config.infill_neoweave_enabled.value == InfillNeoweaveOverride::Enable)
+                    && path.role() == erInternalInfill
+                    && sloped == nullptr;
 
                 // Select which parameter set is in use for this path
-                const bool any_sanding = sanding_active || infill_sanding_active;
+                const bool any_weave = weave_active || infill_weave_active;
 
                 // Resolve period: 0 → auto = line width of this path
-                double sanding_period = sanding_active
-                    ? m_config.interlayer_sanding_period.value
-                    : m_config.infill_sanding_period.value;
-                if (any_sanding && sanding_period < EPSILON) {
-                    sanding_period = unscale<double>(path.width);
-                    if (sanding_period < EPSILON)
-                        sanding_period = 0.4;
+                double weave_period = weave_active
+                    ? m_config.interlayer_neoweave_period.value
+                    : m_config.infill_neoweave_period.value;
+                if (any_weave && weave_period < EPSILON) {
+                    weave_period = unscale<double>(path.width);
+                    if (weave_period < EPSILON)
+                        weave_period = 0.4;
                 }
-                const double sanding_amplitude = sanding_active
-                    ? m_config.interlayer_sanding_amplitude.value
-                    : m_config.infill_sanding_amplitude.value;
-                const double sanding_max_z_speed = sanding_active
-                    ? m_config.interlayer_sanding_max_z_speed.value
-                    : m_config.infill_sanding_max_z_speed.value;
+                const double weave_amplitude = weave_active
+                    ? m_config.interlayer_neoweave_amplitude.value
+                    : m_config.infill_neoweave_amplitude.value;
+                const double weave_max_z_speed = weave_active
+                    ? m_config.interlayer_neoweave_max_z_speed.value
+                    : m_config.infill_neoweave_max_z_speed.value;
 
                 // Triangular wave: max |dZ/dX| = 4*amplitude/period
                 // Cap XY speed so dZ/dt = |dZ/dX| * XY_speed <= max_z_speed
                 // => XY_speed_max = max_z_speed * period / (4 * amplitude)
-                double sanding_F = F; // mm/min, will be capped if needed
-                if (any_sanding && sanding_amplitude > EPSILON && sanding_period > EPSILON) {
-                    const double xy_speed_max = sanding_max_z_speed * sanding_period / (4.0 * sanding_amplitude); // mm/s
+                double weave_F = F; // mm/min, may be capped for Wave mode
+                // Wave mode: cap XY speed globally based on wave geometry.
+                // Linear mode: speed is capped per-line (varies with line length).
+                if (any_weave && !weave_linear && weave_amplitude > EPSILON && weave_period > EPSILON) {
+                    const double xy_speed_max = weave_max_z_speed * weave_period / (4.0 * weave_amplitude); // mm/s
                     const double xy_F_max     = xy_speed_max * 60.0; // mm/min
-                    sanding_F = std::min(F, xy_F_max);
-                    if (std::abs(sanding_F - F) > EPSILON)
-                        gcode += m_writer.set_speed(sanding_F, "", comment);
+                    weave_F = std::min(F, xy_F_max);
+                    if (std::abs(weave_F - F) > EPSILON)
+                        gcode += m_writer.set_speed(weave_F, "", comment);
                 }
 
                 // Tracks cumulative path distance for phase calculation (resets per extrude call)
-                double sanding_dist = 0.0;
+                double weave_dist = 0.0;
+                // Linear mode: track line index so direction alternates each line
+                int weave_line_idx = 0;
                 // ── End sanding preamble ──────────────────────────────────────────────────
 
                 for (const Line& line : path.polyline.lines()) {
@@ -6938,14 +6965,88 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                         }
                     }
                     if (sloped == nullptr) {
-                        if (any_sanding && sanding_amplitude > EPSILON && sanding_period > EPSILON) {
+                        if (any_weave && weave_amplitude > EPSILON) {
+                            // ── Neoweaving Linear (per-line flat Z) ──────────────────────────────
+                            // Each line is printed entirely at one fixed Z offset (+A or -A),
+                            // alternating per line. The nozzle travels to the target Z between
+                            // lines (during the retract/travel), not during extrusion.
+                            //
+                            // Inter-layer nesting: layer parity (m_layer_index % 2) flips the
+                            // phase so that odd layers print where even layers had gaps:
+                            //   even layer: line 0 → -A, line 1 → +A, line 2 → -A ...
+                            //   odd  layer: line 0 → +A, line 1 → -A, line 2 → +A ...
+                            // Combined with monotonic_interlayer_fill half-spacing shift, lines
+                            // from adjacent layers physically nest into each other's gaps.
+                            //
+                            // Lines shorter than min_length are skipped (extruded at current Z).
+                            if (weave_linear && weave_active) {
+                                // Auto-minimum: monotonic fill is one connected polyline.
+                                // Parallel fill lines are joined by short connector segments.
+                                // We must never count connectors toward weave_line_idx or they
+                                // invert the parity between every real fill line, making all
+                                // long lines land on the same Z.
+                                //
+                                // Rule: a segment qualifies as a real fill line only if it is
+                                // longer than the effective minimum threshold. The threshold is
+                                // max(user min_length, 2 × line_width) — the 2× line_width floor
+                                // ensures connectors (typically < 1 line_width) are always
+                                // filtered out, even when the user sets min_length = 0.
+                                const double auto_min = std::max(
+                                    weave_min_length,
+                                    2.0 * unscale<double>(path.width));
+                                const bool line_too_short = line_length < auto_min;
+
+                                if (line_too_short) {
+                                    // Connector or short fill — extrude at current Z, don't count
+                                    gcode += m_writer.extrude_to_xy(this->point_to_gcode(line.b), dE,
+                                        GCodeWriter::full_gcode_comment ? tempDescription : "",
+                                        path.is_force_no_extrusion());
+                                } else {
+                                    // Z range: 0 → +A only (never below nominal_z).
+                                    //
+                                    // Using -A/+A caused moiré interference when two neoweave
+                                    // layers overlap (e.g. two objects sharing the same top
+                                    // surface): the -A lines of one layer visually collide with
+                                    // the +A lines of the other, creating wave patterns.
+                                    //
+                                    // With 0/+A the base is always nominal_z:
+                                    //   Even layer: even lines → nominal_z,   odd lines → +A
+                                    //   Odd  layer: even lines → nominal_z+A, odd lines → nominal_z
+                                    //
+                                    // Lines at nominal_z are extruded with a plain extrude_to_xy
+                                    // (no travel_to_z needed — the restore at end of path already
+                                    // leaves the nozzle at nominal_z).
+                                    const bool layer_flip   = (m_layer_index % 2 != 0);
+                                    const bool line_is_even = (weave_line_idx % 2 == 0);
+                                    // XOR: true → elevated (+A), false → nominal (0)
+                                    const bool elevated = (line_is_even == layer_flip);
+                                    const double z_off  = elevated ? weave_amplitude : 0.0;
+
+                                    // Always emit a Z-only move for every qualifying line.
+                                    // This is required because after an elevated line the nozzle
+                                    // is at nominal+A — without an explicit travel_to_z(nominal)
+                                    // the non-elevated lines would also extrude at nominal+A.
+                                    gcode += m_writer.travel_to_z(m_nominal_z + z_off,
+                                        elevated ? "Neoweaving: line Z +A" : "Neoweaving: line Z nominal");
+
+                                    // Extrude the entire fill line flat at this Z
+                                    gcode += m_writer.extrude_to_xy(this->point_to_gcode(line.b), dE,
+                                        GCodeWriter::full_gcode_comment ? tempDescription : "",
+                                        path.is_force_no_extrusion());
+
+                                    ++weave_line_idx;
+                                }
+                                weave_dist += line_length;
+
+                            } else if (weave_period > EPSILON) {
+                            // ── Wave neoweave mode (original) ─────────────────────────────────────
                             // Subdivide this line into micro-segments for Z oscillation.
                             // Use at least 8 sub-segments per period for a smooth wave.
-                            // Works for both erTopSolidInfill (sanding_active) and
-                            // erInternalInfill (infill_sanding_active) — same algorithm,
+                            // Works for both erTopSolidInfill (weave_active) and
+                            // erInternalInfill (infill_weave_active) — same algorithm,
                             // independent parameter sets resolved in the preamble above.
                             const int    n_per_period = 8;
-                            const double seg_target   = sanding_period / double(n_per_period);
+                            const double seg_target   = weave_period / double(n_per_period);
                             const int    n_segs       = std::max(1, (int)std::ceil(line_length / seg_target));
                             const double seg_len      = line_length / double(n_segs);
                             const double dE_per_seg   = dE / double(n_segs);
@@ -6961,19 +7062,20 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                                 // Triangular wave — phase 0..1 over one period
                                 // wave goes: 0 → +amp (at period/4) → 0 (at period/2)
                                 //            → -amp (at 3*period/4) → 0 (at period)
-                                const double d     = sanding_dist + seg_len * double(si + 1);
-                                double       phase = std::fmod(d / sanding_period, 1.0) * 4.0; // 0..4
+                                const double d     = weave_dist + seg_len * double(si + 1);
+                                double       phase = std::fmod(d / weave_period, 1.0) * 4.0; // 0..4
                                 double       z_off;
-                                if      (phase < 1.0) z_off =  sanding_amplitude * phase;
-                                else if (phase < 3.0) z_off =  sanding_amplitude * (2.0 - phase);
-                                else                  z_off =  sanding_amplitude * (phase - 4.0);
+                                if      (phase < 1.0) z_off =  weave_amplitude * phase;
+                                else if (phase < 3.0) z_off =  weave_amplitude * (2.0 - phase);
+                                else                  z_off =  weave_amplitude * (phase - 4.0);
 
                                 const Vec3d dest3d(pt(0), pt(1), m_nominal_z + z_off);
                                 gcode += m_writer.extrude_to_xyz(dest3d, dE_per_seg,
                                                                  GCodeWriter::full_gcode_comment ? tempDescription : "",
                                                                  path.is_force_no_extrusion());
                             }
-                            sanding_dist += line_length;
+                            weave_dist += line_length;
+                            } // end wave mode
 
                         } else {
                             // Normal extrusion (no sanding)
@@ -6991,14 +7093,14 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     }
                 }
 
-                // ── Neotko Sanding: restore Z and speed after any sanding path ─────────
-                if (any_sanding && sanding_amplitude > EPSILON) {
+                // ── Neotko Neoweaving: restore Z and speed after any sanding path ─────────
+                if (any_weave && weave_amplitude > EPSILON) {
                     // Return nozzle to the layer's nominal Z
                     gcode += m_writer.travel_to_z(m_nominal_z,
-                        sanding_active ? "Neotko sanding: restore layer Z"
-                                       : "Neotko infill sanding: restore layer Z");
+                        weave_active ? "Neotko Neoweaving: restore layer Z"
+                                       : "Neotko infill neoweaving: restore layer Z");
                     // Restore original XY speed if it was capped
-                    if (std::abs(sanding_F - F) > EPSILON)
+                    if (std::abs(weave_F - F) > EPSILON)
                         gcode += m_writer.set_speed(F, "", comment);
                 }
                 // ─────────────────────────────────────────────────────────────────────────
