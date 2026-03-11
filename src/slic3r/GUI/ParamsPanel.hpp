@@ -120,6 +120,8 @@ class ParamsPanel : public wxPanel
 
         // OBJECT PRESET BUTTON: in the top bar, applies a process preset to selected object(s).
         ScalableButton*     m_object_preset_btn   { nullptr };
+        ScalableButton*     m_object_save_btn     { nullptr }; // Save selected object settings as new preset
+        ScalableButton*     m_toggle_panel_btn    { nullptr }; // Toggle process panel visibility
 
         wxBitmap m_toggle_on_icon;
         wxBitmap m_toggle_off_icon;

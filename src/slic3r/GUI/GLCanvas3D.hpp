@@ -1148,6 +1148,8 @@ private:
     // BBS
     //bool _init_view_toolbar();
     bool _init_collapse_toolbar();
+    bool _init_process_panel_toolbar(); // ORCA FullSpectrum
+    void _render_process_panel_toolbar() const; // ORCA FullSpectrum
 
     bool _set_current();
     void _resize(unsigned int w, unsigned int h);

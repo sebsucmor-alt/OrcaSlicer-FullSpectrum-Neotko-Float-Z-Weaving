@@ -281,6 +281,43 @@ ParamsPanel::ParamsPanel( wxWindow* parent, wxWindowID id, const wxPoint& pos, c
                 wxGetApp().plater()->apply_print_preset_to_selected_objects(chosen);
             });
         });
+
+        // OBJECT SAVE BUTTON: saves the selected object's config overrides as a new user preset.
+        m_object_save_btn = new ScalableButton(
+            m_top_panel, wxID_ANY, "save",
+            wxEmptyString, wxDefaultSize, wxDefaultPosition,
+            wxBU_EXACTFIT | wxNO_BORDER, true);
+        m_object_save_btn->SetToolTip(_L("Save selected object's settings as a new process preset"));
+
+        m_object_save_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            // Default name = currently active print preset name
+            const wxString default_name = from_u8(
+                wxGetApp().preset_bundle->prints.get_edited_preset().name);
+            // Ask for the new preset name
+            wxTextEntryDialog dlg(
+                this,
+                _L("Enter a name for the new process preset:"),
+                _L("Save Object Settings as Preset"),
+                default_name);
+            if (dlg.ShowModal() != wxID_OK) return;
+            const std::string name = dlg.GetValue().ToUTF8().data();
+            if (name.empty()) return;
+            wxGetApp().CallAfter([name]() {
+                wxGetApp().plater()->save_selected_object_config_as_preset(name);
+            });
+        });
+
+        // PROCESS PANEL TOGGLE BUTTON: lets the user hide/show this panel
+        // independently of the sidebar. Lives at the far left of the top bar.
+        m_toggle_panel_btn = new ScalableButton(
+            m_top_panel, wxID_ANY, "settings",
+            wxEmptyString, wxDefaultSize, wxDefaultPosition,
+            wxBU_EXACTFIT | wxNO_BORDER, true);
+        m_toggle_panel_btn->SetToolTip(_L("Hide/show process panel"));
+        m_toggle_panel_btn->Bind(wxEVT_BUTTON, [](wxCommandEvent&) {
+            if (wxGetApp().plater())
+                wxGetApp().plater()->toggle_process_panel();
+        });
     }
 
 
@@ -397,6 +434,10 @@ void ParamsPanel::create_layout()
         m_mode_sizer = new wxBoxSizer( wxHORIZONTAL );
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::TitlebarMargin()));
         m_mode_sizer->Add(m_process_icon, 0, wxALIGN_CENTER);
+        if (m_toggle_panel_btn) {
+            m_mode_sizer->AddSpacer(FromDIP(SidebarProps::TitlebarMargin()));
+            m_mode_sizer->Add(m_toggle_panel_btn, 0, wxALIGN_CENTER);
+        }
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         m_mode_sizer->Add( m_title_label, 0, wxALIGN_CENTER );
         m_mode_sizer->AddStretchSpacer(2);
@@ -407,6 +448,10 @@ void ParamsPanel::create_layout()
         if (m_object_preset_btn) {
             m_mode_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
             m_mode_sizer->Add(m_object_preset_btn, 0, wxALIGN_CENTER);
+        }
+        if (m_object_save_btn) {
+            m_mode_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
+            m_mode_sizer->Add(m_object_save_btn, 0, wxALIGN_CENTER);
         }
         m_mode_sizer->AddStretchSpacer(8);
         m_mode_sizer->Add( m_title_view, 0, wxALIGN_CENTER );

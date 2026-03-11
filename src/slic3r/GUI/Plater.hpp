@@ -377,6 +377,7 @@ public:
     void enable_sidebar(bool enabled);
     bool is_sidebar_collapsed() const;
     void collapse_sidebar(bool collapse);
+    void toggle_process_panel(); // ORCA FullSpectrum: show/hide right process panel
     Sidebar::DockingState get_sidebar_docking_state() const;
 
     void reset_window_layout();
@@ -556,6 +557,7 @@ public:
     void paste_from_clipboard();
     void regroup_pasted_link_objects(const std::vector<size_t>& object_idxs); // TEMPORAL LINK
     void apply_print_preset_to_selected_objects(const std::string& preset_name); // Apply process preset per-object
+    void save_selected_object_config_as_preset(const std::string& preset_name);  // Save selected object overrides as new preset
     //BBS: add clone logic
     void clone_selection();
     void center_selection();
@@ -657,6 +659,9 @@ public:
 
     const GLToolbar& get_collapse_toolbar() const;
     GLToolbar& get_collapse_toolbar();
+    const GLToolbar& get_process_panel_toolbar() const; // ORCA FullSpectrum
+    GLToolbar& get_process_panel_toolbar();
+    bool init_process_panel_toolbar();
 
     void update_preview_bottom_toolbar();
     void update_preview_moves_slider();

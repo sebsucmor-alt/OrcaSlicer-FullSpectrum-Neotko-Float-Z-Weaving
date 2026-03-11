@@ -1567,17 +1567,9 @@ Sidebar::Sidebar(Plater *parent)
 
     {
     //add project title
+    // ORCA FullSpectrum: params_panel is now a separate right-side AUI pane.
+    // It is reparented and added to the AUI manager in Plater::priv::priv().
     auto params_panel = ((MainFrame*)parent->GetParent())->m_param_panel;
-    if (params_panel) {
-        params_panel->get_top_panel()->Reparent(p->scrolled);
-        auto spliter_1 = new ::StaticLine(p->scrolled);
-        spliter_1->SetLineColour("#A6A9AA");
-        scrolled_sizer->Add(spliter_1, 0, wxEXPAND);
-        scrolled_sizer->Add(params_panel->get_top_panel(), 0, wxEXPAND);
-        auto spliter_2 = new ::StaticLine(p->scrolled);
-        spliter_2->SetLineColour("#CECECE");
-        scrolled_sizer->Add(spliter_2, 0, wxEXPAND);
-    }
 
     //add project content
     p->sizer_params = new wxBoxSizer(wxVERTICAL);
@@ -1642,10 +1634,8 @@ Sidebar::Sidebar(Plater *parent)
     p->object_settings->Hide();
     p->sizer_params->Add(p->object_settings->get_sizer(), 0, wxEXPAND | wxTOP, 5 * em / 10);
 #else
-    if (params_panel) {
-        params_panel->Reparent(p->scrolled);
-        scrolled_sizer->Add(params_panel, 3, wxEXPAND);
-    }
+    // ORCA FullSpectrum: params_panel is managed as a right AUI pane — not added here.
+    (void)params_panel;
 #endif
     }
 
@@ -5636,6 +5626,9 @@ struct Plater::priv
         bool                  is_collapsed{false};
         bool                  show{false};
     } sidebar_layout;
+
+    // ORCA FullSpectrum: right-side process panel (detached from sidebar)
+    bool m_process_panel_shown { true };
     Bed3D bed;
     Camera camera;
     //BBS: partplate related structure
@@ -5662,6 +5655,7 @@ struct Plater::priv
     // BBS
     //GLToolbar view_toolbar;
     GLToolbar collapse_toolbar;
+    GLToolbar process_panel_toolbar; // ORCA FullSpectrum: right-side toggle button
     Preview *preview;
     AssembleView* assemble_view { nullptr };
     bool first_enter_assemble{ true };
@@ -5798,6 +5792,7 @@ struct Plater::priv
 
     void enable_sidebar(bool enabled);
     void collapse_sidebar(bool collapse);
+    void toggle_process_panel(); // ORCA FullSpectrum: show/hide right process panel
     void update_sidebar(bool force_update = false);
     void reset_window_layout();
     Sidebar::DockingState get_sidebar_docking_state();
@@ -5811,6 +5806,7 @@ struct Plater::priv
 
     // BBS
     bool init_collapse_toolbar();
+    bool init_process_panel_toolbar(); // ORCA FullSpectrum
 
     // BBS
     void hide_select_machine_dlg()
@@ -6221,6 +6217,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     , m_job_prepare_state(Job::JobPrepareState::PREPARE_STATE_DEFAULT)
     , delayed_scene_refresh(false)
     , collapse_toolbar(GLToolbar::Normal, "Collapse")
+    , process_panel_toolbar(GLToolbar::Normal, "ProcessPanel")
     //BBS :partplatelist construction
     , partplate_list(this->q, &model)
 {
@@ -6311,6 +6308,33 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
                                    .BottomDockable(false)
                                    .Floatable(true)
                                    .BestSize(wxSize(42 * wxGetApp().em_unit(), 90 * wxGetApp().em_unit())));
+
+    // ORCA FullSpectrum: process panel as a fixed right-side pane.
+    // The params_panel (top_panel header + content) is assembled into a single
+    // container so it can be shown/hidden independently of the sidebar.
+    if (auto* pp = main_frame->m_param_panel) {
+        auto* right_container = new wxPanel(q, wxID_ANY);
+        auto* right_sizer     = new wxBoxSizer(wxVERTICAL);
+        pp->get_top_panel()->Reparent(right_container);
+        pp->Reparent(right_container);
+        right_sizer->Add(pp->get_top_panel(), 0, wxEXPAND);
+        auto* sep = new ::StaticLine(right_container);
+        sep->SetLineColour(wxColour("#CECECE"));
+        right_sizer->Add(sep, 0, wxEXPAND);
+        right_sizer->Add(pp, 1, wxEXPAND);
+        right_container->SetSizer(right_sizer);
+
+        m_aui_mgr.AddPane(right_container, wxAuiPaneInfo()
+                                   .Name("process_panel")
+                                   .Right()
+                                   .CloseButton(false)
+                                   .TopDockable(false)
+                                   .BottomDockable(false)
+                                   .LeftDockable(false)
+                                   .Floatable(false)
+                                   .BestSize(wxSize(42 * wxGetApp().em_unit(), 90 * wxGetApp().em_unit()))
+                                   .Show(m_process_panel_shown));
+    }
 
     auto* panel_sizer = new wxBoxSizer(wxHORIZONTAL);
     panel_sizer->Add(view3D, 1, wxEXPAND | wxALL, 0);
@@ -6871,6 +6895,29 @@ void Plater::priv::enable_sidebar(bool enabled)
 
     sidebar_layout.is_enabled = enabled;
     update_sidebar();
+}
+
+void Plater::priv::toggle_process_panel()
+{
+    m_process_panel_shown = !m_process_panel_shown;
+
+    auto& pane = m_aui_mgr.GetPane("process_panel");
+    if (pane.IsOk()) {
+        if (m_process_panel_shown)
+            pane.Show();
+        else
+            pane.Hide();
+        m_aui_mgr.Update();
+    }
+
+    // Update tooltip on process_panel_toolbar button
+    int id = process_panel_toolbar.get_item_id("toggle_process_panel");
+    if (id >= 0) {
+        std::string tip = m_process_panel_shown
+            ? _u8L("Hide process panel")
+            : _u8L("Show process panel");
+        process_panel_toolbar.set_tooltip(id, tip);
+    }
 }
 
 void Plater::priv::collapse_sidebar(bool collapse)
@@ -7765,7 +7812,16 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     if (obj->name.empty()) {
                         obj->name = fs::path(obj->input_file).filename().string();
                     }
-                    obj->rotate(Geometry::deg2rad(config->opt_float("preferred_orientation")), Axis::Z);
+                    // ORCA FullSpectrum: only rotate if angle is non-zero.
+                    // ModelObject::rotate() always calls center_around_origin() internally,
+                    // even for a 0-degree rotation. That wipes out the file's XY position
+                    // before load_model_objects() can capture it, breaking STL origin
+                    // preservation for all single-file and "no-group" multi-file loads.
+                    // When preferred_orientation == 0 (the common default), skip the call
+                    // entirely to keep the original world-space vertex coordinates intact.
+                    const double pref_angle = Geometry::deg2rad(config->opt_float("preferred_orientation"));
+                    if (std::abs(pref_angle) > 1e-9)
+                        obj->rotate(pref_angle, Axis::Z);
                 }
 
                 if (plate_data.size() > 0) {
@@ -12090,6 +12146,49 @@ bool Plater::priv::init_collapse_toolbar()
     // Now "collapse" sidebar to current state. This is done so the tooltip
     // is updated before the toolbar is first used.
     wxGetApp().plater()->collapse_sidebar(wxGetApp().plater()->is_sidebar_collapsed());
+
+    return true;
+}
+
+bool Plater::priv::init_process_panel_toolbar()
+{
+    if (wxGetApp().is_gcode_viewer())
+        return true;
+
+    if (process_panel_toolbar.get_items_count() > 0)
+        return true; // already initialized
+
+    BackgroundTexture::Metadata background_data;
+    background_data.filename = m_is_dark ? "toolbar_background_dark.png" : "toolbar_background.png";
+    background_data.left   = 16;
+    background_data.top    = 16;
+    background_data.right  = 16;
+    background_data.bottom = 16;
+
+    if (!process_panel_toolbar.init(background_data))
+        return false;
+
+    process_panel_toolbar.set_layout_type(GLToolbar::Layout::Vertical);
+    process_panel_toolbar.set_horizontal_orientation(GLToolbar::Layout::HO_Left);
+    process_panel_toolbar.set_vertical_orientation(GLToolbar::Layout::VO_Top);
+    process_panel_toolbar.set_border(4.0f);
+    process_panel_toolbar.set_separator_size(4);
+    process_panel_toolbar.set_gap_size(2);
+    process_panel_toolbar.del_all_item();
+
+    GLToolbarItem::Data item;
+    item.name = "toggle_process_panel";
+    item.icon_filename = "collapse.svg";
+    item.sprite_id = 0;
+    item.left.action_callback = []() {
+        wxGetApp().plater()->toggle_process_panel();
+    };
+    if (!process_panel_toolbar.add_item(item))
+        return false;
+
+    // Set initial tooltip
+    int id = process_panel_toolbar.get_item_id("toggle_process_panel");
+    process_panel_toolbar.set_tooltip(id, _u8L("Hide process panel"));
     return true;
 }
 
@@ -15018,7 +15117,7 @@ void ProjectDropDialog::on_dpi_changed(const wxRect& suggested_rect)
 //BBS: remove GCodeViewer as seperate APP logic
 bool Plater::load_files(const wxArrayString& filenames)
 {
-    const std::regex pattern_drop(".*[.](stp|step|stl|oltp|obj|amf|3mf|svg|zip)", std::regex::icase);
+    const std::regex pattern_drop(".*[.](stp|step|stl|oltp|obj|amf|3mf|svg|zip|factory)", std::regex::icase); // ORCA FullSpectrum: added factory
     const std::regex pattern_gcode_drop(".*[.](gcode|g)", std::regex::icase);
 
     std::vector<fs::path> normal_paths;
@@ -15403,6 +15502,12 @@ bool Plater::is_sidebar_enabled() const { return p->sidebar_layout.is_enabled; }
 void Plater::enable_sidebar(bool enabled) { p->enable_sidebar(enabled); }
 bool Plater::is_sidebar_collapsed() const { return p->sidebar_layout.is_collapsed; }
 void Plater::collapse_sidebar(bool collapse) { p->collapse_sidebar(collapse); }
+
+void Plater::toggle_process_panel()
+{
+    p->toggle_process_panel();
+}
+
 Sidebar::DockingState Plater::get_sidebar_docking_state() const { return p->get_sidebar_docking_state(); }
 
 void Plater::reset_window_layout() { p->reset_window_layout(); }
@@ -18235,6 +18340,66 @@ void Plater::apply_print_preset_to_selected_objects(const std::string& preset_na
     this->changed_objects(changed_idxs);
 }
 
+void Plater::save_selected_object_config_as_preset(const std::string& preset_name)
+{
+    if (preset_name.empty()) return;
+
+    // Collect the first selected object
+    const Selection& sel = p->get_selection();
+    std::set<int> obj_idxs;
+    for (unsigned int vi : sel.get_volume_idxs())
+        obj_idxs.insert(sel.get_volume(vi)->object_idx());
+    if (obj_idxs.empty()) {
+        wxMessageBox(_L("No object selected."), _L("Save Preset"), wxOK | wxICON_INFORMATION, this);
+        return;
+    }
+
+    const ModelObject* obj = p->model.objects[*obj_idxs.begin()];
+
+    // Start from the currently active (edited) print preset as the base
+    PresetCollection& prints = wxGetApp().preset_bundle->prints;
+    const Preset& base = prints.get_edited_preset();
+
+    // Clone the base config and apply the object's per-object overrides on top
+    DynamicPrintConfig merged = base.config;
+
+    // Build the same safe key list used by apply_print_preset_to_selected_objects
+    static const std::set<std::string> s_mm_keys {
+        "wall_filament", "sparse_infill_filament", "solid_infill_filament",
+        "support_filament", "support_interface_filament",
+        "flush_into_objects", "flush_into_infill", "flush_into_support",
+        "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
+        "wipe_speed", "wipe_on_loops", "wipe_before_external_loop",
+        "role_based_wipe_speed", "support_interface_not_for_body"
+    };
+    t_config_option_keys safe_keys;
+    for (const auto& k : PrintObjectConfig().keys())
+        if (s_mm_keys.find(k) == s_mm_keys.end()) safe_keys.push_back(k);
+    for (const auto& k : PrintRegionConfig().keys())
+        if (s_mm_keys.find(k) == s_mm_keys.end()) safe_keys.push_back(k);
+
+    merged.apply_only(obj->config.get(), safe_keys, /*ignore_nonexistent=*/true);
+
+    // Build a temporary Preset from the merged config and save it
+    Preset tmp = base;
+    tmp.name   = preset_name;
+    tmp.config = std::move(merged);
+    tmp.config.option<ConfigOptionString>("print_settings_id", true)->value = preset_name;
+    tmp.is_system  = false;
+    tmp.is_default = false;
+    tmp.vendor     = nullptr;
+    tmp.inherits().clear();
+
+    prints.save_current_preset(preset_name, /*detach=*/true, /*save_to_project=*/false, &tmp, nullptr);
+
+    // Refresh preset combo so the new preset appears immediately
+    wxGetApp().load_current_presets();
+
+    wxMessageBox(
+        wxString::Format(_("Preset \"%s\" saved successfully."), from_u8(preset_name)),
+        _L("Save Preset"), wxOK | wxICON_INFORMATION, this);
+}
+
 void Plater::clone_selection()
 {
     if (is_selection_empty())
@@ -19108,6 +19273,22 @@ const GLToolbar& Plater::get_collapse_toolbar() const
 GLToolbar& Plater::get_collapse_toolbar()
 {
     return p->collapse_toolbar;
+}
+
+// ORCA FullSpectrum: right-side process panel toggle toolbar
+const GLToolbar& Plater::get_process_panel_toolbar() const
+{
+    return p->process_panel_toolbar;
+}
+
+GLToolbar& Plater::get_process_panel_toolbar()
+{
+    return p->process_panel_toolbar;
+}
+
+bool Plater::init_process_panel_toolbar()
+{
+    return p->init_process_panel_toolbar();
 }
 
 void Plater::update_preview_bottom_toolbar()

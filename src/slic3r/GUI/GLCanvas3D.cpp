@@ -1282,6 +1282,7 @@ void GLCanvas3D::on_change_color_mode(bool is_dark, bool reinit) {
             m_separator_toolbar.set_icon_dirty();
             m_main_toolbar.set_icon_dirty();
             wxGetApp().plater()->get_collapse_toolbar().set_icon_dirty();
+            wxGetApp().plater()->get_process_panel_toolbar().set_icon_dirty();
             m_assemble_view_toolbar.set_icon_dirty();
             m_gizmos.set_icon_dirty();
         }
@@ -2065,6 +2066,9 @@ void GLCanvas3D::render(bool only_init)
 
 	    if (tooltip.empty())
             tooltip = wxGetApp().plater()->get_collapse_toolbar().get_tooltip();
+
+        if (tooltip.empty())
+            tooltip = wxGetApp().plater()->get_process_panel_toolbar().get_tooltip();
 
         // BBS
 #if 0
@@ -4045,6 +4049,14 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     }
 
     if (!mouse_in_layer_editing && wxGetApp().plater()->get_collapse_toolbar().on_mouse(evt, *this)) {
+        if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
+            mouse_up_cleanup();
+        m_mouse.set_start_position_3D_as_invalid();
+        return;
+    }
+
+    // ORCA FullSpectrum: process panel toggle toolbar (right side)
+    if (!mouse_in_layer_editing && wxGetApp().plater()->get_process_panel_toolbar().on_mouse(evt, *this)) {
         if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
             mouse_up_cleanup();
         m_mouse.set_start_position_3D_as_invalid();
@@ -6423,6 +6435,8 @@ bool GLCanvas3D::_init_toolbars()
 
     if (!_init_collapse_toolbar())
         return false;
+    if (!_init_process_panel_toolbar())
+        return false;
 
     return true;
 }
@@ -6739,6 +6753,11 @@ bool GLCanvas3D::_init_view_toolbar()
 bool GLCanvas3D::_init_collapse_toolbar()
 {
     return wxGetApp().plater()->init_collapse_toolbar();
+}
+
+bool GLCanvas3D::_init_process_panel_toolbar()
+{
+    return wxGetApp().plater()->init_process_panel_toolbar();
 }
 
 bool GLCanvas3D::_set_current()
@@ -7531,6 +7550,8 @@ void GLCanvas3D::_check_and_update_toolbar_icon_scale()
     // Update collapse toolbar
     GLToolbar& collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
     collapse_toolbar.set_enabled(wxGetApp().plater()->get_sidebar_docking_state() != Sidebar::None);
+    // ORCA FullSpectrum: process panel toggle toolbar — always enabled
+    wxGetApp().plater()->get_process_panel_toolbar().set_enabled(true);
 
     // Don't update a toolbar scale, when we are on a Preview
     if (wxGetApp().plater()->is_preview_shown()) {
@@ -7622,6 +7643,7 @@ void GLCanvas3D::_render_overlays()
     _render_separator_toolbar_left();
     _render_main_toolbar();
     _render_collapse_toolbar();
+    _render_process_panel_toolbar();
     _render_assemble_view_toolbar();
     //BBS: GUI refactor: GLToolbar
     _render_imgui_select_plate_toolbar();
@@ -8345,6 +8367,17 @@ void GLCanvas3D::_render_collapse_toolbar() const
 
     collapse_toolbar.set_position(top, left);
     collapse_toolbar.render(*this);
+}
+
+// ORCA FullSpectrum: process panel toggle button on RIGHT edge of canvas
+void GLCanvas3D::_render_process_panel_toolbar() const
+{
+    GLToolbar& toolbar = wxGetApp().plater()->get_process_panel_toolbar();
+    const Size  cnv_size = get_canvas_size();
+    const float top  = 0.5f * (float)cnv_size.get_height();
+    const float left = 0.5f * (float)cnv_size.get_width() - (float)toolbar.get_width();
+    toolbar.set_position(top, left);
+    toolbar.render(*this);
 }
 
 //BBS reander assemble toolbar
