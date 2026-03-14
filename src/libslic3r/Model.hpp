@@ -433,8 +433,13 @@ public:
     bool                    is_fuzzy_skin_painted() const;
     // This object may have a varying layer height by painting or by a table.
     // Even if true is returned, the layer height profile may be "flat" with no difference to default layering.
-    bool                    has_custom_layering() const
-        { return ! this->layer_config_ranges.empty() || ! this->layer_height_profile.empty(); }
+    // ORCA FullSpectrum: z-preset ranges (no layer_height key) do NOT count as custom layering.
+    bool                    has_custom_layering() const {
+        if (!this->layer_height_profile.empty()) return true;
+        for (const auto& [range, cfg] : this->layer_config_ranges)
+            if (cfg.has("layer_height")) return true;
+        return false;
+    }
 
     ModelInstance*          add_instance();
     ModelInstance*          add_instance(const ModelInstance &instance);

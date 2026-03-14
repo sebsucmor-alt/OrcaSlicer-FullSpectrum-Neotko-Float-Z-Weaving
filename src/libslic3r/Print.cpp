@@ -1176,9 +1176,20 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     }
 
     // Some of the objects has variable layer height applied by painting or by a table.
-    bool has_custom_layering = std::find_if(m_objects.begin(), m_objects.end(), 
-        [](const PrintObject *object) { return object->model_object()->has_custom_layering(); }) 
-        != m_objects.end();
+    // ORCA FullSpectrum: z-override ranges (marked with z_preset_name) are excluded
+    // even if they happen to contain a layer_height key, because they represent
+    // per-zone config overrides, not variable layer height painting.
+    bool has_custom_layering = std::find_if(m_objects.begin(), m_objects.end(),
+        [](const PrintObject *object) {
+            const ModelObject* mo = object->model_object();
+            if (!mo->layer_height_profile.empty()) return true;
+            for (const auto& [range, cfg] : mo->layer_config_ranges) {
+                // Ignore our z-override ranges entirely for this check
+                if (cfg.has("z_preset_name")) continue;
+                if (cfg.has("layer_height"))  return true;
+            }
+            return false;
+        }) != m_objects.end();
 
     // Custom layering is not allowed for tree supports as of now.
     for (size_t print_object_idx = 0; print_object_idx < m_objects.size(); ++ print_object_idx)
@@ -1863,6 +1874,7 @@ std::map<ObjectID, unsigned int> getObjectExtruderMap(const Print& print) {
 // Slicing process, running at a background thread.
 void Print::process(long long *time_cost_with_cache, bool use_cache)
 {
+
     long long start_time = 0, end_time = 0;
     if (time_cost_with_cache)
         *time_cost_with_cache = 0;
@@ -2020,7 +2032,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 for (int i = range.begin(); i < range.end(); i++) {
                     PrintObject* obj = m_objects[i];
                     if (need_slicing_objects.count(obj) != 0) {
-                        obj->generate_support_material();
+                obj->generate_support_material();
                     }
                     else {
                         if (obj->set_started(posSupportMaterial))
@@ -2181,7 +2193,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     for (PrintObject *obj : m_objects) {
         if (((!use_cache)&&(need_slicing_objects.count(obj) != 0))
             || (use_cache &&(re_slicing_objects.count(obj) != 0))){
-            obj->simplify_extrusion_path();
+                obj->simplify_extrusion_path();
         }
         else {
             if (obj->set_started(posSimplifyPath))

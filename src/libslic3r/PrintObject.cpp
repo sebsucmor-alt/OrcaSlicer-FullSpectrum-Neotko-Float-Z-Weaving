@@ -1,4 +1,5 @@
 #include "Exception.hpp"
+#include <fstream>
 #include "Print.hpp"
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
@@ -3097,17 +3098,20 @@ static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPr
             out.wall_filament.value          = extruder;
         }
     // 2) Copy the rest of the values.
-    for (auto it = in.cbegin(); it != in.cend(); ++ it)
-        if (it->first != key_extruder)
+    for (auto it = in.cbegin(); it != in.cend(); ++ it) {
+        if (it->first != key_extruder) {
             if (ConfigOption* my_opt = out.option(it->first, false); my_opt != nullptr) {
                 if (one_of(it->first, keys_extruders)) {
                     // Ignore "default" extruders.
                     int extruder = static_cast<const ConfigOptionInt*>(it->second.get())->value;
                     if (extruder > 0)
                         my_opt->setInt(extruder);
-                } else
+                } else {
                     my_opt->set(it->second.get());
+                }
             }
+        }
+    }
 }
 
 PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &default_or_parent_region_config, const DynamicPrintConfig *layer_range_config, const ModelVolume &volume, size_t num_extruders)
@@ -3806,8 +3810,23 @@ bool PrintObject::update_layer_height_profile(const ModelObject          &model_
         layer_height_profile.clear();
 
     if (layer_height_profile.empty() || layer_height_profile[1] != slicing_parameters.first_object_layer_height || has_dithering_ranges) {
+        // ORCA FullSpectrum: strip z-preset ranges (z_preset_name key but no layer_height)
+        // before passing to layer_height_profile_from_ranges, which only understands
+        // ranges that contain "layer_height" and crashes on foreign keys.
+        t_layer_config_ranges lh_ranges;
+        for (const auto& [r, cfg] : *ranges_to_use) {
+            if (cfg.has("layer_height"))
+                lh_ranges[r] = cfg;
+        }
+        const t_layer_config_ranges& ranges_for_lh = lh_ranges.empty() ? *ranges_to_use : lh_ranges;
+        // But if ALL ranges are z-preset (no layer_height key at all), pass empty map
+        // so layer_height_profile_from_ranges uses its default uniform profile.
+        bool any_lh = false;
+        for (const auto& [r, cfg] : *ranges_to_use)
+            if (cfg.has("layer_height")) { any_lh = true; break; }
+        static const t_layer_config_ranges s_empty_ranges;
         //layer_height_profile = layer_height_profile_adaptive(slicing_parameters, model_object.layer_config_ranges, model_object.volumes);
-        layer_height_profile = layer_height_profile_from_ranges(slicing_parameters, *ranges_to_use);
+        layer_height_profile = layer_height_profile_from_ranges(slicing_parameters, any_lh ? lh_ranges : s_empty_ranges);
         // The layer height profile is already compressed.
         updated = true;
     }

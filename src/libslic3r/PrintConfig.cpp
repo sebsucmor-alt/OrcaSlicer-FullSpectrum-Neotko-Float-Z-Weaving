@@ -5909,6 +5909,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    // ORCA FullSpectrum: Z-Preset Regions — preset name marker stored in layer_config_ranges
+    // This key is intentionally minimal (just a string name) so that
+    // apply_to_print_region_config() silently ignores it (it's not a PrintRegionConfig key).
+    // The slicer reads it via GCode.cpp / region_config override at slice time.
+    def = this->add("z_preset_name", coString);
+    def->label = L("Z Preset Region Name");
+    def->tooltip = L("Internal marker key used by Z-Preset Regions. Stores the process preset "
+                     "name assigned to a layer height range.");
+    def->mode = comDevelop; // hidden from normal UI
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("infill_neoweave_max_z_speed", coFloat);
     def->label = L("Infill neoweave max Z speed");
     def->category = L("Strength");

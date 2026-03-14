@@ -4252,6 +4252,36 @@ LayerResult GCode::process_layer(const Print& print,
     std::string gcode;
     assert(is_decimal_separator_point()); // for the sprintfs
 
+    // --- ORCA FullSpectrum: Evaluate Z-Override Hooks ---
+    std::string z_preset_gcode;
+    if (auto pobj = layer.object(); pobj && pobj->model_object()) {
+        const ModelObject* mobj = pobj->model_object();
+        bool entered_temp = false, exited_temp = false;
+        bool entered_fan = false, exited_fan = false;
+        int target_temp = -1, target_fan_pwm = -1;
+
+        for (const auto& kv : mobj->layer_config_ranges) {
+            if (!kv.second.has("z_preset_name")) continue;
+            double z_start = kv.first.first, z_end = kv.first.second;
+            bool active_now = (print_z > z_start - EPSILON && print_z <= z_end + EPSILON);
+            bool active_prev = (m_last_layer_z > z_start - EPSILON && m_last_layer_z <= z_end + EPSILON);
+            if (active_now && !active_prev) {
+                if (kv.second.has("nozzle_temperature")) { entered_temp = true; try { target_temp = std::stoi(kv.second.opt_serialize("nozzle_temperature")); } catch(...) {} }
+                if (kv.second.has("fan_always_on")) { entered_fan = true; target_fan_pwm = kv.second.get().opt_bool("fan_always_on") ? 255 : 0; }
+                else if (kv.second.has("min_fan_speed")) { entered_fan = true; try { target_fan_pwm = std::stoi(kv.second.opt_serialize("min_fan_speed")) * 255 / 100; } catch(...) {} }
+            } else if (!active_now && active_prev) {
+                if (kv.second.has("nozzle_temperature")) exited_temp = true;
+                if (kv.second.has("fan_always_on") || kv.second.has("min_fan_speed")) exited_fan = true;
+            }
+        }
+        if (entered_temp && target_temp >= 0) z_preset_gcode += "M104 S" + std::to_string(target_temp) + " ; Z-Override Temp\n";
+        else if (exited_temp) z_preset_gcode += "M104 S" + std::to_string(print.config().nozzle_temperature.get_at(m_writer.extruder()->id())) + " ; Z-Override Revert\n";
+        
+        if (entered_fan && target_fan_pwm >= 0) z_preset_gcode += "M106 S" + std::to_string(target_fan_pwm) + " ; Z-Override Fan\n";
+        else if (exited_fan) z_preset_gcode += "M106 S" + std::to_string((int)(print.config().fan_min_speed.get_at(m_writer.extruder()->id()) * 255.0 / 100.0)) + " ; Z-Override Revert\n";
+    }
+    // ----------------------------------------------------
+
     // add tag for processor
     gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) + "\n";
     // export layer z
@@ -4343,6 +4373,9 @@ LayerResult GCode::process_layer(const Print& print,
     }
     // BBS: set layer time fan speed after layer change gcode
     gcode += ";_SET_FAN_SPEED_CHANGING_LAYER\n";
+    
+    // ORCA FullSpectrum: Inject Z-Override G-Code
+    gcode += z_preset_gcode;
 
     // Calibration Layer-specific GCode
     switch (print.calib_mode()) {
@@ -6929,14 +6962,14 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     ? m_config.interlayer_neoweave_max_z_speed.value
                     : m_config.infill_neoweave_max_z_speed.value;
 
-                // Triangular wave: max |dZ/dX| = 4*amplitude/period
+                // Sinusoidal wave: max |dZ/dX| = (2*PI/period) * amplitude
                 // Cap XY speed so dZ/dt = |dZ/dX| * XY_speed <= max_z_speed
-                // => XY_speed_max = max_z_speed * period / (4 * amplitude)
+                // => XY_speed_max = max_z_speed * period / (2 * PI * amplitude)
                 double weave_F = F; // mm/min, may be capped for Wave mode
                 // Wave mode: cap XY speed globally based on wave geometry.
                 // Linear mode: speed is capped per-line (varies with line length).
                 if (any_weave && !weave_linear && weave_amplitude > EPSILON && weave_period > EPSILON) {
-                    const double xy_speed_max = weave_max_z_speed * weave_period / (4.0 * weave_amplitude); // mm/s
+                    const double xy_speed_max = weave_max_z_speed * weave_period / (2.0 * PI * weave_amplitude); // mm/s
                     const double xy_F_max     = xy_speed_max * 60.0; // mm/min
                     weave_F = std::min(F, xy_F_max);
                     if (std::abs(weave_F - F) > EPSILON)
@@ -7059,15 +7092,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                                 const double t = double(si + 1) / double(n_segs);
                                 const Vec2d  pt(pt_a + t * (pt_b - pt_a));
 
-                                // Triangular wave — phase 0..1 over one period
-                                // wave goes: 0 → +amp (at period/4) → 0 (at period/2)
-                                //            → -amp (at 3*period/4) → 0 (at period)
+                                // Sinusoidal wave — continuous derivative avoids lookahead buffer starvation
                                 const double d     = weave_dist + seg_len * double(si + 1);
-                                double       phase = std::fmod(d / weave_period, 1.0) * 4.0; // 0..4
-                                double       z_off;
-                                if      (phase < 1.0) z_off =  weave_amplitude * phase;
-                                else if (phase < 3.0) z_off =  weave_amplitude * (2.0 - phase);
-                                else                  z_off =  weave_amplitude * (phase - 4.0);
+                                double       phase = (d / weave_period) * 2.0 * PI;
+                                double       z_off = weave_amplitude * std::sin(phase);
 
                                 const Vec3d dest3d(pt(0), pt(1), m_nominal_z + z_off);
                                 gcode += m_writer.extrude_to_xyz(dest3d, dE_per_seg,
