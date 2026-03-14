@@ -1,4 +1,5 @@
 #include "Plater.hpp"
+
 #include "libslic3r/Config.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/filament_mixer.h"
@@ -86,6 +87,7 @@
 #include "GUI_ObjectList.hpp"
 #include "GUI_Utils.hpp"
 #include "GUI_Factories.hpp"
+#include "ZPresetRegions.hpp"  // ORCA FullSpectrum
 #include "wxExtensions.hpp"
 #include "MainFrame.hpp"
 #include "format.hpp"
@@ -5667,9 +5669,10 @@ struct Plater::priv
     int                    m_next_link_group_id { 1 };
     // Last known XYZ offset per object, used to compute movement delta.
     // Refreshed at drag-start, after every INSTANCE_MOVED sync, and after undo/redo.
-    std::map<size_t, Vec3d> m_pre_move_offsets;
+    std::map<size_t, Geometry::Transformation> m_pre_move_offsets; // ORCA: full transform (pos+rot+scale)
     // Guards against recursive INSTANCE_MOVED while we propagate a delta.
     bool                   m_syncing_links { false };
+    bool                   m_syncing_group { false }; // TEMPORAL LINK: blocks re-entrant changed_object loops
     // Persistent Z-protection for floating objects.  Something inside
     // reload_scene() in the Snapmaker fork resets the Z of floating objects to
     // 0 whenever update() is called.  This map stores the canonical full Vec3d
@@ -6222,6 +6225,10 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     , partplate_list(this->q, &model)
 {
     m_is_dark = wxGetApp().app_config->get("dark_color_mode") == "1";
+    
+    std::string spp = wxGetApp().app_config->get("show_process_panel");
+    if (!spp.empty())
+        m_process_panel_shown = (spp == "true");
 
     m_aui_mgr.SetManagedWindow(q);
     m_aui_mgr.SetDockSizeConstraint(1, 1);
@@ -6429,10 +6436,12 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         view3D_canvas->Bind(EVT_GLCANVAS_QUESTION_MARK, [](SimpleEvent&) { wxGetApp().keyboard_shortcuts(); });
         view3D_canvas->Bind(EVT_GLCANVAS_INCREASE_INSTANCES, [this](Event<int>& evt)
             { if (evt.data == 1) this->q->increase_instances(); else if (this->can_decrease_instances()) this->q->decrease_instances(); });
-        view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_MOVED, [this](SimpleEvent&) { on_instance_moved_with_link_sync(); });
+        view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_MOVED,   [this](SimpleEvent&) { on_instance_moved_with_link_sync(); });
         view3D_canvas->Bind(EVT_GLCANVAS_FORCE_UPDATE, [this](SimpleEvent&) { update(); });
-        view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_ROTATED, [this](SimpleEvent&) { update(); });
-        view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_SCALED, [this](SimpleEvent&) { update(); });
+        // ORCA FullSpectrum: route ROTATED and SCALED through the same handler
+        // as MOVED — floating-Z guard and link-group rot+scale sync both fire.
+        view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_ROTATED, [this](SimpleEvent&) { on_instance_moved_with_link_sync(); });
+        view3D_canvas->Bind(EVT_GLCANVAS_INSTANCE_SCALED,  [this](SimpleEvent&) { on_instance_moved_with_link_sync(); });
         // BBS
         //view3D_canvas->Bind(EVT_GLCANVAS_ENABLE_ACTION_BUTTONS, [this](Event<bool>& evt) { this->sidebar->enable_buttons(evt.data); });
         view3D_canvas->Bind(EVT_GLCANVAS_ENABLE_ACTION_BUTTONS, [this](Event<bool>& evt) { on_slice_button_status(evt.data); });
@@ -6900,6 +6909,7 @@ void Plater::priv::enable_sidebar(bool enabled)
 void Plater::priv::toggle_process_panel()
 {
     m_process_panel_shown = !m_process_panel_shown;
+    wxGetApp().app_config->set("show_process_panel", m_process_panel_shown ? "true" : "false");
 
     auto& pane = m_aui_mgr.GetPane("process_panel");
     if (pane.IsOk()) {
@@ -8669,6 +8679,8 @@ void Plater::priv::reset(bool apply_presets_change)
     if (view3D->is_layers_editing_enabled())
         view3D->get_canvas3d()->force_main_toolbar_left_action(view3D->get_canvas3d()->get_main_toolbar_item_id("layersediting"));
     view3D->get_canvas3d()->reset_all_gizmos();
+    // ORCA FullSpectrum: clear Z-band highlight left over from Z-Preset Regions dialog
+    view3D->get_canvas3d()->clear_z_band_highlight();
 
     reset_gcode_toolpaths();
     //BBS: update gcode to current partplate's
@@ -8843,11 +8855,13 @@ void Plater::priv::update_pre_move_snapshot()
     m_pre_move_offsets.clear();
     for (ModelObject* obj : model.objects) {
         if (obj->instances.empty()) continue;
-        const Vec3d offset = obj->instances[0]->get_offset();
-        m_pre_move_offsets[obj->id().id] = offset;
+        // ORCA FullSpectrum: store full transformation (offset + rotation + scale)
+        // so that link propagation can relay rotation and scale changes too.
+        m_pre_move_offsets[obj->id().id] = obj->instances[0]->get_transformation();
         // Protect objects that are intentionally floating above the bed.
         // min_z() returns the world-space bottom Z of the object.
         const double mz = obj->min_z();
+        const Vec3d offset = obj->instances[0]->get_offset();
         if (mz > 0.5)
             m_floating_z_guard[obj->id().id] = offset;
         else
@@ -8982,7 +8996,9 @@ void Plater::priv::on_instance_moved_with_link_sync()
 
     // ── Fast path: no link groups ─────────────────────────────────────────────
     if (m_link_groups.empty()) {
+        m_syncing_group = true;
         update();
+        m_syncing_group = false;
         if (restore_floating_z()) {
             update_pre_move_snapshot();
             view3D->reload_scene(false);
@@ -9042,16 +9058,29 @@ void Plater::priv::on_instance_moved_with_link_sync()
 
         const auto pit = m_pre_move_offsets.find(moved_id);
         if (pit == m_pre_move_offsets.end()) continue;
-        const Vec3d delta = moved_obj->instances[0]->get_offset() - pit->second;
-        if (delta.norm() < 1e-6) continue;
 
-        // Filter spurious Z-reset deltas: large Z dominated, tiny XY.
-        Vec3d safe_delta = delta;
-        const double xy_mag = Vec2d(delta.x(), delta.y()).norm();
-        if (std::abs(delta.z()) > 0.5 && xy_mag < std::abs(delta.z()) * 0.1)
-            safe_delta.z() = 0.0;
+        // ORCA FullSpectrum: compute deltas for translation, rotation AND scale
+        const Geometry::Transformation& pre  = pit->second;
+        const Geometry::Transformation& post = moved_obj->instances[0]->get_transformation();
 
-        // Apply delta to non-selected followers only.
+        const Vec3d delta_offset = post.get_offset()         - pre.get_offset();
+        const Vec3d delta_rot    = post.get_rotation()        - pre.get_rotation();
+        const Vec3d delta_scale  = post.get_scaling_factor()  - pre.get_scaling_factor();
+
+        const bool has_pos   = delta_offset.norm() > 1e-6;
+        const bool has_rot   = delta_rot.norm()    > 1e-6;
+        const bool has_scale = delta_scale.norm()  > 1e-6;
+        if (!has_pos && !has_rot && !has_scale) continue;
+
+        // Filter spurious Z-reset deltas on position: large Z, tiny XY.
+        Vec3d safe_delta_offset = delta_offset;
+        if (has_pos) {
+            const double xy_mag = Vec2d(delta_offset.x(), delta_offset.y()).norm();
+            if (std::abs(delta_offset.z()) > 0.5 && xy_mag < std::abs(delta_offset.z()) * 0.1)
+                safe_delta_offset.z() = 0.0;
+        }
+
+        // Apply deltas to non-selected followers only.
         m_syncing_links = true;
         for (int other_idx = 0; other_idx < (int)model.objects.size(); ++other_idx) {
             if (other_idx == moved_idx) continue;
@@ -9061,11 +9090,19 @@ void Plater::priv::on_instance_moved_with_link_sync()
             if (og == m_link_groups.end() || og->second != group_id) continue;
             if (moved_obj_ids.count(other->id().id)) continue;
             for (ModelInstance* inst : other->instances) {
-                const Vec3d new_offset = inst->get_offset() + safe_delta;
-                inst->set_offset(new_offset);
-                // Keep floating-z-guard in sync with intentional moves.
-                if (m_floating_z_guard.count(other->id().id))
-                    m_floating_z_guard[other->id().id] = new_offset;
+                if (has_pos) {
+                    const Vec3d new_offset = inst->get_offset() + safe_delta_offset;
+                    inst->set_offset(new_offset);
+                    if (m_floating_z_guard.count(other->id().id))
+                        m_floating_z_guard[other->id().id] = new_offset;
+                }
+                if (has_rot)
+                    inst->set_rotation(inst->get_rotation() + delta_rot);
+                if (has_scale) {
+                    const Vec3d new_scale = inst->get_scaling_factor() + delta_scale;
+                    // Clamp to avoid zero/negative scale
+                    inst->set_scaling_factor(new_scale.cwiseMax(Vec3d(0.001, 0.001, 0.001)));
+                }
             }
         }
         m_syncing_links = false;
@@ -9082,7 +9119,9 @@ void Plater::priv::on_instance_moved_with_link_sync()
 
     // Refresh baseline and re-render.
     update_pre_move_snapshot();
+    m_syncing_group = true;
     update();
+    m_syncing_group = false;
 
     // Synchronous restore pass: catches resets that happen inside update().
     if (restore_floating_z()) {
@@ -11639,8 +11678,35 @@ void Plater::priv::show_right_click_menu(Vec2d mouse_position, wxMenu *menu)
     GLCanvas3D &canvas = *q->canvas3D();
     canvas.apply_retina_scale(mouse_position);
     canvas.set_popup_menu_position(mouse_position);
-    // TEMPORAL LINK: inject "Link Objects" / "Break Link" into any object context menu
+    // ORCA FullSpectrum: inject "Link Objects" / "Break Link" / "Z-Preset Regions"
+    // into any object context menu.
+    // IMPORTANT: menu is a persistent wxMenu* (MenuFactory reuses it across calls).
+    // We must remove any items we previously injected before re-adding, or they
+    // accumulate on every right-click.
     if (menu && current_panel != assemble_view) {
+
+        // ── Clean up ALL previously injected items ──────────────────────────
+        // Use wxMenu::FindItem(label) which is reliable on all platforms.
+        // Repeat until no more found (handles duplicates from prior crashes).
+        {
+            const wxString injected_labels[] = {
+                _L("Link Objects"), _L("Break Link"), _L("Z-Preset Regions...")
+            };
+            for (const wxString& lbl : injected_labels) {
+                int found_id;
+                while ((found_id = menu->FindItem(lbl)) != wxNOT_FOUND)
+                    menu->Destroy(found_id);
+            }
+            // Remove any now-orphaned trailing separator
+            while (menu->GetMenuItemCount() > 0) {
+                wxMenuItem* last = menu->FindItemByPosition(menu->GetMenuItemCount() - 1);
+                if (last && last->IsSeparator())
+                    menu->Destroy(last);
+                else
+                    break;
+            }
+        }
+
         const Selection& sel = get_selection();
         const bool is_multi  = sel.is_multiple_full_instance() || sel.is_multiple_full_object();
         const bool is_single = sel.is_single_full_instance()   || sel.is_single_full_object();
@@ -11669,6 +11735,18 @@ void Plater::priv::show_right_click_menu(Vec2d mouse_position, wxMenu *menu)
                 menu->Append(break_id, _L("Break Link"));
                 menu->Bind(wxEVT_COMMAND_MENU_SELECTED,
                     [this](wxCommandEvent&) { break_link_selected_objects(); }, break_id);
+            }
+
+            // Z-Preset Regions: show for single object selection
+            if (is_single) {
+                const int zp_id = wxWindow::NewControlId();
+                menu->Append(zp_id, _L("Z-Preset Regions..."));
+                menu->Bind(wxEVT_COMMAND_MENU_SELECTED,
+                    [this](wxCommandEvent&) {
+                        const int obj_idx = get_selected_object_idx();
+                        if (obj_idx >= 0)
+                            GUI::open_z_preset_regions_dialog(obj_idx);
+                    }, zp_id);
             }
         }
     }
@@ -13112,6 +13190,9 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
     //get_partplate_list().update_slice_context_to_current_plate(p->background_process);
     //p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
     reset(transfer_preset_changes);
+    // ORCA FullSpectrum: clear any Z-band highlight left over from Z-Preset Regions dialog
+    if (GLCanvas3D* zband_canvas = get_view3D_canvas3D())
+        zband_canvas->clear_z_band_highlight();
     reset_project_dirty_after_save();
     reset_project_dirty_initial_presets();
     wxGetApp().update_saved_preset_from_current_preset();
@@ -18118,6 +18199,7 @@ void Plater::changed_mesh(int obj_idx)
 }
 
 void Plater::changed_object(ModelObject &object){
+    if (p->m_syncing_group) return; // TEMPORAL LINK: prevent cascade
     assert(object.get_model() == &p->model); // is object from same model?
     object.invalidate_bounding_box();
 
@@ -18128,9 +18210,9 @@ void Plater::changed_object(ModelObject &object){
         // Update the SLAPrint from the current Model, so that the reload_scene()
         // pulls the correct data, update the 3D scene.
         p->update_restart_background_process(true, false);
-    } else
+    } else {
         p->view3D->reload_scene(false);
-
+    }
     // update print
     p->schedule_background_process();
         
@@ -18142,6 +18224,7 @@ void Plater::changed_object(ModelObject &object){
 
 void Plater::changed_object(int obj_idx)
 {
+    if (p->m_syncing_group) return; // TEMPORAL LINK: prevent cascade
     if (obj_idx < 0)
         return;
     ModelObject *object = p->model.objects[obj_idx];
@@ -18152,8 +18235,8 @@ void Plater::changed_object(int obj_idx)
 
 void Plater::changed_objects(const std::vector<size_t>& object_idxs)
 {
-    if (object_idxs.empty())
-        return;
+    if (p->m_syncing_group || object_idxs.empty())
+        return; // TEMPORAL LINK: prevent cascade
 
     for (size_t obj_idx : object_idxs) {
         if (obj_idx < p->model.objects.size()) {

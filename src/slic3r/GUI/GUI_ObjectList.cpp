@@ -2,6 +2,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GUI_Factories.hpp"
+#include "ZPresetRegions.hpp"  // ORCA FullSpectrum
 //#include "GUI_ObjectLayers.hpp"
 #include "GUI_App.hpp"
 #include "I18N.hpp"
@@ -23,6 +24,7 @@
 #include "Widgets/ProgressDialog.hpp"
 #include "SingleChoiceDialog.hpp"
 #include "StepMeshDialog.hpp"
+#include "ZPresetRegions.hpp"  // ORCA FullSpectrum
 
 #include <boost/algorithm/string.hpp>
 #include <wx/progdlg.h>
@@ -734,6 +736,7 @@ ModelConfig& ObjectList::get_item_config(const wxDataViewItem& item) const
 
     assert(obj_idx >= 0 || ((type & itVolume) && vol_idx >=0));
     return type & itVolume ?(*m_objects)[obj_idx]->volumes[vol_idx]->config :
+           type & itZPreset ?(*m_objects)[obj_idx]->layer_config_ranges[m_objects_model->GetZPresetRangeByItem(item)] :
            type & itLayer  ?(*m_objects)[obj_idx]->layer_config_ranges[m_objects_model->GetLayerRangeByItem(item)] :
                             (*m_objects)[obj_idx]->config;
 }
@@ -1314,6 +1317,7 @@ void ObjectList::paste_layers_into_list()
         ranges.emplace(range);
 
     layers_item = add_layer_root_item(object_item);
+    add_z_preset_root_item(object_item); // ORCA FullSpectrum
 
     changed_object(obj_idx);
 
@@ -1576,7 +1580,10 @@ void ObjectList::show_context_menu(const bool evt_context_menu)
         if (item)
         {
             const ItemType type = m_objects_model->GetItemType(item);
-            if (!(type & (itPlate | itObject | itVolume | itInstance)))
+            if (type & (itZPreset | itZPresetRoot)) {
+                // ORCA FullSpectrum — handled below
+            }
+            else if (!(type & (itPlate | itObject | itVolume | itInstance)))
                 return;
             if (type & itVolume) {
                 int obj_idx, vol_idx;
@@ -1589,10 +1596,21 @@ void ObjectList::show_context_menu(const bool evt_context_menu)
 			volume->is_svg() ? plater->svg_part_menu() : // ORCA fixes missing "Edit SVG" item for Add/Negative/Modifier SVG objects in object list
                     plater->part_menu();
             }
-            else
+            else if (type & itZPreset) {
+                // ORCA FullSpectrum: right-click on a Z-Preset node opens the dialog
+                wxMenu ctx;
+                ctx.Append(wxID_ANY, _L("Edit Z-Preset Regions..."));
+                ctx.Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+                    open_z_preset_regions_for_selection();
+                });
+                PopupMenu(&ctx);
+                return;
+            }
+            else {
                 menu =  type & itPlate                                              ? plater->plate_menu() :
                         type & itInstance                                           ? plater->instance_menu() :
                         printer_technology() == ptFFF                               ? plater->object_menu() : plater->sla_object_menu();
+            }
             plater->SetPlateIndexByRightMenuInLeftUI(-1);
             if (type & itPlate) {
                 int            plate_idx = -1;
@@ -1606,8 +1624,31 @@ void ObjectList::show_context_menu(const bool evt_context_menu)
             menu = plater->default_menu();
     }
 
-    if (menu)
+    // ORCA FullSpectrum: append Z-Preset Regions to the object menu
+    // when a single object node is selected in the list.
+    if (menu) {
+        const auto sel_item = GetSelection();
+        if (sel_item && (m_objects_model->GetItemType(sel_item) & itObject)) {
+            // Reliable removal using FindItem(label) — works on all platforms
+            {
+                int found_id;
+                while ((found_id = menu->FindItem(_L("Z-Preset Regions..."))) != wxNOT_FOUND)
+                    menu->Destroy(found_id);
+                // Remove trailing separator if left over
+                while (menu->GetMenuItemCount() > 0) {
+                    wxMenuItem* last = menu->FindItemByPosition(menu->GetMenuItemCount() - 1);
+                    if (last && last->IsSeparator()) menu->Destroy(last);
+                    else break;
+                }
+            }
+            menu->AppendSeparator();
+            const int zp_id = wxWindow::NewControlId();
+            menu->Append(zp_id, _L("Z-Preset Regions..."));
+            menu->Bind(wxEVT_COMMAND_MENU_SELECTED,
+                [this](wxCommandEvent&) { open_z_preset_regions_for_selection(); }, zp_id);
+        }
         plater->PopupMenu(menu);
+    }
 }
 
 void ObjectList::extruder_editing()
@@ -3168,6 +3209,7 @@ void ObjectList::layers_editing()
 
         // create layer root item
         layers_item = add_layer_root_item(obj_item);
+        add_z_preset_root_item(obj_item); // ORCA FullSpectrum
     }
     if (!layers_item.IsOk())
         return;
@@ -3219,6 +3261,55 @@ void ObjectList::boolean()
     add_object_to_list(m_objects->size() - 1);
     select_item(m_objects_model->GetItemById(m_objects->size() - 1));
     update_selections_on_canvas();
+}
+
+
+// ─── ORCA FullSpectrum: Z-Preset Region tree entries ─────────────────────────
+
+wxDataViewItem ObjectList::add_z_preset_root_item(const wxDataViewItem obj_item)
+{
+    const int obj_idx = m_objects_model->GetIdByItem(obj_item);
+    if (obj_idx < 0 || printer_technology() == ptSLA)
+        return wxDataViewItem(nullptr);
+
+    ModelObject* obj = object(obj_idx);
+    // Collect ranges that have a z_preset_name key
+    bool has_preset_ranges = false;
+    for (const auto& [range, cfg] : obj->layer_config_ranges)
+        if (cfg.has(KEY_Z_PRESET_NAME)) { has_preset_ranges = true; break; }
+    if (!has_preset_ranges)
+        return wxDataViewItem(nullptr);
+
+    wxDataViewItem root_item = m_objects_model->AddZPresetRoot(obj_item);
+    for (const auto& [range, cfg] : obj->layer_config_ranges) {
+        if (!cfg.has(KEY_Z_PRESET_NAME)) continue;
+        const std::string preset_name = cfg.opt_serialize(KEY_Z_PRESET_NAME);
+        m_objects_model->AddZPresetChild(root_item, range, preset_name);
+    }
+    Expand(root_item);
+    return root_item;
+}
+
+void ObjectList::open_z_preset_regions_for_selection()
+{
+    const int obj_idx = get_selected_obj_idx();
+    if (obj_idx < 0) return;
+
+    // ShowModal + changed_object happen inside the free function.
+    // changed_object may trigger a full object list reload, so we
+    // rebuild the ZPreset tree nodes with CallAfter to run once that
+    // reload has settled.
+    open_z_preset_regions_dialog(obj_idx);
+
+    // CallAfter: rebuild tree after any changed_object UI refresh
+    CallAfter([this, obj_idx]() {
+        wxDataViewItem obj_item = m_objects_model->GetItemById(obj_idx);
+        if (!obj_item.IsOk()) return;
+        wxDataViewItem old_root = m_objects_model->GetZPresetRootItem(obj_item);
+        if (old_root.IsOk())
+            m_objects_model->Delete(old_root);
+        add_z_preset_root_item(obj_item);
+    });
 }
 
 wxDataViewItem ObjectList::add_layer_root_item(const wxDataViewItem obj_item)
@@ -3970,6 +4061,7 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed,
 
     // Add layers if it has
     add_layer_root_item(item);
+    add_z_preset_root_item(item); // ORCA FullSpectrum
 
 #ifndef __WXOSX__
     if (call_selection_changed) {

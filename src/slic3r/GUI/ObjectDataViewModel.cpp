@@ -131,6 +131,13 @@ ObjectDataViewModelNode::ObjectDataViewModelNode(ObjectDataViewModelNode* parent
         m_bmp = create_scaled_bitmap(LayerRootIcon);
         m_name = _(L("Layers"));
     }
+    // ORCA FullSpectrum: Z-Preset root node
+    else if (type == itZPresetRoot)
+    {
+        m_bmp  = create_scaled_bitmap("height_range_modifier"); // reuse existing icon
+        m_name = _(L("Z-Preset Regions"));
+        init_container();
+    }
     else if (type == itInfo)
         assert(false);
 
@@ -749,11 +756,24 @@ static bool append_root_node(ObjectDataViewModelNode *parent_node,
                 parent_node->GetNthChild(inst_root_id);
 
     if (inst_root_id < 0) {
-        if ((root_type&itInstanceRoot) ||
-            ( (root_type&itLayerRoot) && get_root_idx(parent_node, itInstanceRoot)<0) )
+        if (root_type & itInstanceRoot)
             parent_node->Append(*root_node);
-        else if (root_type&itLayerRoot)
-            parent_node->Insert(*root_node, static_cast<unsigned int>(get_root_idx(parent_node, itInstanceRoot)));
+        else if (root_type & itLayerRoot) {
+            const int inst_idx = get_root_idx(parent_node, itInstanceRoot);
+            if (inst_idx < 0)
+                parent_node->Append(*root_node);
+            else
+                parent_node->Insert(*root_node, static_cast<unsigned int>(inst_idx));
+        }
+        // ORCA FullSpectrum: itZPresetRoot goes before itLayerRoot and itInstanceRoot
+        else if (root_type & itZPresetRoot) {
+            int before = get_root_idx(parent_node, itLayerRoot);
+            if (before < 0) before = get_root_idx(parent_node, itInstanceRoot);
+            if (before < 0)
+                parent_node->Append(*root_node);
+            else
+                parent_node->Insert(*root_node, static_cast<unsigned int>(before));
+        }
         return true;
     }
 
@@ -922,6 +942,106 @@ wxDataViewItem ObjectDataViewModel::AddLayersChild(const wxDataViewItem &parent_
     return layer_item;
 }
 
+
+// ─── ORCA FullSpectrum: Z-Preset Region nodes ────────────────────────────────
+
+wxDataViewItem ObjectDataViewModel::AddZPresetRoot(const wxDataViewItem &parent_item)
+{
+    return AddRoot(parent_item, itZPresetRoot);
+}
+
+wxDataViewItem ObjectDataViewModel::AddZPresetChild(const wxDataViewItem &parent_item,
+                                                    const t_layer_height_range& range,
+                                                    const std::string& preset_name,
+                                                    const int index /*= -1*/)
+{
+    ObjectDataViewModelNode *parent_node = static_cast<ObjectDataViewModelNode*>(parent_item.GetID());
+    if (!parent_node) return wxDataViewItem(0);
+
+    // Find the ZPresetRoot node
+    ObjectDataViewModelNode *root_node  = nullptr;
+    wxDataViewItem           root_item;
+    if (parent_node->GetType() & itZPresetRoot) {
+        root_node = parent_node;
+        root_item = parent_item;
+    } else {
+        const int root_idx = get_root_idx(parent_node, itZPresetRoot);
+        if (root_idx < 0) return wxDataViewItem(0);
+        root_node = parent_node->GetNthChild(root_idx);
+        root_item = wxDataViewItem((void*)root_node);
+    }
+
+    // Build display label: "0.0–10.0 mm  [preset name]"
+    const std::string label_range = (boost::format(" %.2f-%.2f ") % range.first % range.second).str();
+    const wxString display_name = wxString(label_range) +
+        (preset_name.empty() ? _L("(no override)") : wxString::FromUTF8(preset_name));
+
+    // Create child node reusing itLayer infrastructure but with itZPreset type
+    ObjectDataViewModelNode *child_node = new ObjectDataViewModelNode(root_node, itZPreset);
+    child_node->m_z_preset_range = range;
+    child_node->m_name           = display_name;
+    child_node->m_bmp            = create_scaled_bitmap("height_range_layer");
+
+    const int children_cnt = root_node->GetChildCount();
+    if (index < 0) {
+        child_node->m_idx = children_cnt;
+        root_node->Append(child_node);
+    } else {
+        child_node->m_idx = index;
+        for (int i = index; i < children_cnt; i++)
+            root_node->GetNthChild(i)->SetIdx(i + 1);
+        root_node->Insert(child_node, index);
+    }
+
+    const wxDataViewItem child_item((void*)child_node);
+    ItemAdded(root_item, child_item);
+    return child_item;
+}
+
+wxDataViewItem ObjectDataViewModel::GetZPresetRootItem(const wxDataViewItem &parent_item) const
+{
+    ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(parent_item.GetID());
+    if (!node) return wxDataViewItem(0);
+    const int idx = get_root_idx(node, itZPresetRoot);
+    return idx < 0 ? wxDataViewItem(0) : wxDataViewItem((void*)node->GetNthChild(idx));
+}
+
+t_layer_height_range ObjectDataViewModel::GetZPresetRangeByItem(const wxDataViewItem &item) const
+{
+    ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(item.GetID());
+    if (!node || !(node->GetType() & itZPreset))
+        return { 0.0f, 0.0f };
+    return node->m_z_preset_range;
+}
+
+wxDataViewItem ObjectDataViewModel::GetItemByZPresetRange(const int obj_idx,
+                                                           const t_layer_height_range& range) const
+{
+    if (obj_idx < 0 || obj_idx >= (int)m_objects.size()) return wxDataViewItem(0);
+    ObjectDataViewModelNode *obj_node = m_objects[obj_idx];
+    const int root_idx = get_root_idx(obj_node, itZPresetRoot);
+    if (root_idx < 0) return wxDataViewItem(0);
+    ObjectDataViewModelNode *root_node = obj_node->GetNthChild(root_idx);
+    for (int i = 0; i < (int)root_node->GetChildCount(); ++i) {
+        ObjectDataViewModelNode *child = root_node->GetNthChild(i);
+        if (std::abs(child->m_z_preset_range.first  - range.first)  < 1e-4 &&
+            std::abs(child->m_z_preset_range.second - range.second) < 1e-4)
+            return wxDataViewItem((void*)child);
+    }
+    return wxDataViewItem(0);
+}
+
+void ObjectDataViewModel::UpdateZPresetChild(const wxDataViewItem &item, const std::string& preset_name)
+{
+    ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(item.GetID());
+    if (!node || !(node->GetType() & itZPreset)) return;
+    const auto& range = node->m_z_preset_range;
+    const std::string label_range = (boost::format(" %.2f-%.2f ") % range.first % range.second).str();
+    node->m_name = wxString(label_range) +
+        (preset_name.empty() ? _L("(no override)") : wxString::FromUTF8(preset_name));
+    ItemChanged(item);
+}
+
 size_t ObjectDataViewModel::GetItemIndexForFirstVolume(ObjectDataViewModelNode* node_parent)
 {
     assert(node_parent->m_volumes_cnt > 0);
@@ -990,10 +1110,27 @@ wxDataViewItem ObjectDataViewModel::Delete(const wxDataViewItem &item)
 	// first remove the node from the parent's array of children;
 	// NOTE: MyObjectTreeModelNodePtrArray is only an array of _pointers_
 	//       thus removing the node from it doesn't result in freeing it
-    if (node->m_type & (itInstanceRoot | itLayerRoot))
+    if (node->m_type & (itInstanceRoot | itLayerRoot | itZPresetRoot))
     {
         // node can be deleted by the Delete, let's check its type while we safely can
         bool is_instance_root = (node->m_type & itInstanceRoot);
+
+        // ORCA FullSpectrum: If root node is already empty (can happen if children were deleted without
+        // removing the root node due to complex selection logic), delete it manually here 
+        // to avoid infinite loops in caller where GetChildCount() wouldn't decrease.
+        if (node->GetChildCount() == 0 && !is_instance_root) {
+            ObjectDataViewModelNode* obj_node = node->GetParent();
+            if (obj_node) {
+                obj_node->GetChildren().Remove(node);
+#ifndef __WXGTK__
+                if (obj_node->GetChildCount() == 0)
+                    obj_node->m_container = false;
+#endif //__WXGTK__
+            }
+            delete node;
+            ItemDeleted(parent, item); // Notifies the GUI that the item is deleted
+            return parent;
+        }
 
         for (int i = int(node->GetChildCount() - 1); i >= (is_instance_root ? 1 : 0); i--)
             Delete(wxDataViewItem(node->GetNthChild(i)));
@@ -1054,8 +1191,8 @@ wxDataViewItem ObjectDataViewModel::Delete(const wxDataViewItem &item)
     if (node->m_type & itInstance)
         UpdateObjectPrintable(wxDataViewItem(node_parent->GetParent()));
 
-    // if there was last layer item, delete this one and layers root item
-    if (node_parent->GetChildCount() == 0 && node_parent->m_type == itLayerRoot)
+    // if there was last layer item, delete this one and layers/zpreset root item
+    if (node_parent->GetChildCount() == 0 && (node_parent->m_type == itLayerRoot || node_parent->m_type == itZPresetRoot))
     {
         ObjectDataViewModelNode* obj_node = node_parent->GetParent();
         obj_node->GetChildren().Remove(node_parent);
@@ -1219,6 +1356,7 @@ void ObjectDataViewModel::DeleteChildren(wxDataViewItem& parent)
 
     // set m_containet to FALSE if parent has no child
 #ifndef __WXGTK__
+    if (root->GetChildCount() == 0)
         root->m_container = false;
 #endif //__WXGTK__
 }

@@ -1,0 +1,5 @@
+IMPORTANT: Add the following two lines to src/slic3r/GUI/CMakeLists.txt
+in the slic3r_GUI_sources list alongside ParamsPanel.cpp:
+
+    ZPresetRegions.cpp
+    ZPresetRegions.hpp

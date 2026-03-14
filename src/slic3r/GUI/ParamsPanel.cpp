@@ -17,6 +17,7 @@
 #include "Widgets/SwitchButton.hpp"
 #include "Widgets/Button.hpp"
 #include "GUI_Factories.hpp"
+#include "ZPresetRegions.hpp"  // ORCA FullSpectrum: Z-Preset Regions dialog
 
 
 namespace Slic3r {
@@ -307,6 +308,18 @@ ParamsPanel::ParamsPanel( wxWindow* parent, wxWindowID id, const wxPoint& pos, c
             });
         });
 
+        // ORCA FullSpectrum: Z-Preset Regions button
+        m_z_regions_btn = new ScalableButton(
+            m_top_panel, wxID_ANY, "table",
+            wxEmptyString, wxDefaultSize, wxDefaultPosition,
+            wxBU_EXACTFIT | wxNO_BORDER, true);
+        m_z_regions_btn->SetToolTip(_L("Z-Preset Regions: assign different process presets to Z height ranges"));
+        m_z_regions_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            int obj_idx = wxGetApp().obj_list()->get_selected_obj_idx();
+            if (obj_idx >= 0)
+                Slic3r::GUI::open_z_preset_regions_dialog(obj_idx);
+        });
+
         // PROCESS PANEL TOGGLE BUTTON: lets the user hide/show this panel
         // independently of the sidebar. Lives at the far left of the top bar.
         m_toggle_panel_btn = new ScalableButton(
@@ -317,6 +330,23 @@ ParamsPanel::ParamsPanel( wxWindow* parent, wxWindowID id, const wxPoint& pos, c
         m_toggle_panel_btn->Bind(wxEVT_BUTTON, [](wxCommandEvent&) {
             if (wxGetApp().plater())
                 wxGetApp().plater()->toggle_process_panel();
+        });
+
+        // ORCA FullSpectrum: model opacity slider (10%–100%)
+        m_opacity_slider = new wxSlider(m_top_panel, wxID_ANY, 100, 10, 100,
+            wxDefaultPosition, wxSize(FromDIP(80), -1), wxSL_HORIZONTAL);
+        m_opacity_slider->SetToolTip(_L("Model opacity (10%–100%)"));
+        m_opacity_slider->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
+            float alpha = m_opacity_slider->GetValue() / 100.0f;
+            auto* plater = wxGetApp().plater();
+            if (!plater) return;
+            auto* canvas = plater->get_view3D_canvas3D();
+            if (!canvas) return;
+            for (GLVolume* vol : canvas->get_volumes().volumes) {
+                if (vol && !vol->is_modifier)
+                    vol->color.a(alpha);
+            }
+            canvas->request_extra_frame();
         });
     }
 
@@ -438,6 +468,10 @@ void ParamsPanel::create_layout()
             m_mode_sizer->AddSpacer(FromDIP(SidebarProps::TitlebarMargin()));
             m_mode_sizer->Add(m_toggle_panel_btn, 0, wxALIGN_CENTER);
         }
+        if (m_opacity_slider) {
+            m_mode_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
+            m_mode_sizer->Add(m_opacity_slider, 0, wxALIGN_CENTER);
+        }
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         m_mode_sizer->Add( m_title_label, 0, wxALIGN_CENTER );
         m_mode_sizer->AddStretchSpacer(2);
@@ -452,6 +486,10 @@ void ParamsPanel::create_layout()
         if (m_object_save_btn) {
             m_mode_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
             m_mode_sizer->Add(m_object_save_btn, 0, wxALIGN_CENTER);
+        }
+        if (m_z_regions_btn) {
+            m_mode_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
+            m_mode_sizer->Add(m_z_regions_btn, 0, wxALIGN_CENTER);
         }
         m_mode_sizer->AddStretchSpacer(8);
         m_mode_sizer->Add( m_title_view, 0, wxALIGN_CENTER );
@@ -736,6 +774,7 @@ void ParamsPanel::msw_rescale()
     if (m_setting_btn) m_setting_btn->msw_rescale();
     if (m_search_btn) m_search_btn->msw_rescale();
     if (m_compare_btn) m_compare_btn->msw_rescale();
+    if (m_z_regions_btn) m_z_regions_btn->msw_rescale();
     if (m_tips_arrow) m_tips_arrow->msw_rescale();
     if (m_object_preset_btn) m_object_preset_btn->msw_rescale();
     m_left_sizer->SetMinSize(wxSize(40 * em_unit(this), -1));

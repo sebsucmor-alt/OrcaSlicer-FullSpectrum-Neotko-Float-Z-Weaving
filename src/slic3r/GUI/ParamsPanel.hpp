@@ -122,6 +122,8 @@ class ParamsPanel : public wxPanel
         ScalableButton*     m_object_preset_btn   { nullptr };
         ScalableButton*     m_object_save_btn     { nullptr }; // Save selected object settings as new preset
         ScalableButton*     m_toggle_panel_btn    { nullptr }; // Toggle process panel visibility
+        wxSlider*           m_opacity_slider       { nullptr }; // ORCA FullSpectrum: model opacity (10-100%)
+        ScalableButton*     m_z_regions_btn        { nullptr }; // ORCA FullSpectrum: Z-Preset Regions dialog
 
         wxBitmap m_toggle_on_icon;
         wxBitmap m_toggle_off_icon;

@@ -1134,6 +1134,19 @@ public:
 
     bool make_current_for_postinit();
 
+    // ORCA FullSpectrum: Z-band highlight for Z-Preset Regions dialog
+    struct ZBandHighlight {
+        GLModel plane_lo;
+        GLModel plane_hi;
+        GLModel band_fill;
+        bool    active { false };
+    };
+    ZBandHighlight m_z_band;
+    void set_z_band_highlight(float z_world_min, float z_world_max,
+                               float bbox_x0, float bbox_y0,
+                               float bbox_x1, float bbox_y1);
+    void clear_z_band_highlight();
+
 private:
     bool _is_shown_on_screen() const;
 
@@ -1176,6 +1189,8 @@ private:
     void _render_plane() const;
     void _render_selection();
     void _render_sequential_clearance();
+
+
 #if ENABLE_RENDER_SELECTION_CENTER
     void _render_selection_center();
 #endif // ENABLE_RENDER_SELECTION_CENTER

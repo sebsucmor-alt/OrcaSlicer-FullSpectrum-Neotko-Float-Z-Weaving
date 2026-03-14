@@ -1983,6 +1983,27 @@ void GLCanvas3D::render(bool only_init)
     }
 
     _render_sequential_clearance();
+    // ORCA FullSpectrum: inline Z-band highlight
+    if (m_z_band.active) {
+        GLShaderProgram* zband_shader = wxGetApp().get_shader("flat");
+        if (zband_shader) {
+            zband_shader->start_using();
+            const Camera& zband_cam = wxGetApp().plater()->get_camera();
+            zband_shader->set_uniform("view_model_matrix", zband_cam.get_view_matrix());
+            zband_shader->set_uniform("projection_matrix", zband_cam.get_projection_matrix());
+            glsafe(::glDisable(GL_CULL_FACE));
+            glsafe(::glEnable(GL_BLEND));
+            glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+            glsafe(::glDisable(GL_DEPTH_TEST));
+            m_z_band.band_fill.render();
+            m_z_band.plane_lo.render();
+            m_z_band.plane_hi.render();
+            glsafe(::glEnable(GL_DEPTH_TEST));
+            glsafe(::glDisable(GL_BLEND));
+            glsafe(::glEnable(GL_CULL_FACE));
+            zband_shader->stop_using();
+        }
+    }
 #if ENABLE_RENDER_SELECTION_CENTER
     _render_selection_center();
 #endif // ENABLE_RENDER_SELECTION_CENTER
@@ -7536,6 +7557,72 @@ void GLCanvas3D::_render_sequential_clearance()
         || can_sequential_clearance_show_in_gizmo()) {
         m_sequential_print_clearance.render();
     }
+}
+
+
+// ─── ORCA FullSpectrum: Z-band highlight for Z-Preset Regions ────────────────
+
+void GLCanvas3D::set_z_band_highlight(float z_min, float z_max,
+                                       float x0, float y0,
+                                       float x1, float y1)
+{
+    const float margin = 3.0f;
+    const float fx0 = x0 - margin, fx1 = x1 + margin;
+    const float fy0 = y0 - margin, fy1 = y1 + margin;
+
+    auto build_plane = [&](GLModel& model, float z, const ColorRGBA& col) {
+        model.reset();
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Triangles,
+                     GLModel::Geometry::EVertexLayout::P3 };
+        g.color = col;
+        g.add_vertex(Vec3f(fx0, fy0, z));
+        g.add_vertex(Vec3f(fx1, fy0, z));
+        g.add_vertex(Vec3f(fx1, fy1, z));
+        g.add_vertex(Vec3f(fx0, fy1, z));
+        g.add_triangle(0, 1, 2);
+        g.add_triangle(2, 3, 0);
+        model.init_from(std::move(g));
+    };
+
+    // Two border planes — semi-transparent blue, just enough to see the boundary
+    build_plane(m_z_band.plane_lo, z_min, { 0.2f, 0.5f, 1.0f, 0.40f });
+    build_plane(m_z_band.plane_hi, z_max, { 0.2f, 0.5f, 1.0f, 0.40f });
+
+    // Fill slab: very low opacity (25%) — just a hint, not a visual obstruction
+    {
+        m_z_band.band_fill.reset();
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Triangles,
+                     GLModel::Geometry::EVertexLayout::P3 };
+        g.color = { 0.3f, 0.6f, 1.0f, 0.08f }; // 8% fill — barely visible tint
+        // Only top and bottom faces (no sides) — reduces visual clutter
+        g.add_vertex(Vec3f(fx0, fy0, z_min)); // 0
+        g.add_vertex(Vec3f(fx1, fy0, z_min)); // 1
+        g.add_vertex(Vec3f(fx1, fy1, z_min)); // 2
+        g.add_vertex(Vec3f(fx0, fy1, z_min)); // 3
+        g.add_vertex(Vec3f(fx0, fy0, z_max)); // 4
+        g.add_vertex(Vec3f(fx1, fy0, z_max)); // 5
+        g.add_vertex(Vec3f(fx1, fy1, z_max)); // 6
+        g.add_vertex(Vec3f(fx0, fy1, z_max)); // 7
+        // Bottom face
+        g.add_triangle(0, 1, 2); g.add_triangle(2, 3, 0);
+        // Top face
+        g.add_triangle(4, 6, 5); g.add_triangle(6, 4, 7);
+        m_z_band.band_fill.init_from(std::move(g));
+    }
+
+    m_z_band.active = true;
+    request_extra_frame();
+}
+
+void GLCanvas3D::clear_z_band_highlight()
+{
+    m_z_band.plane_lo.reset();
+    m_z_band.plane_hi.reset();
+    m_z_band.band_fill.reset();
+    m_z_band.active = false;
+    request_extra_frame();
 }
 
 #if ENABLE_RENDER_SELECTION_CENTER

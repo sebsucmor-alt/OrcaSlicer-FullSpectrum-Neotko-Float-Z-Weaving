@@ -306,6 +306,9 @@ public:
 
     void                boolean();    // BBS: Boolean Operation of parts
     wxDataViewItem      add_layer_root_item(const wxDataViewItem obj_item);
+    // ORCA FullSpectrum: Z-Preset Region nodes
+    wxDataViewItem      add_z_preset_root_item(const wxDataViewItem obj_item);
+    void                open_z_preset_regions_for_selection();
     wxDataViewItem      add_settings_item(wxDataViewItem parent_item, const DynamicPrintConfig* config);
 
     DynamicPrintConfig  get_default_layer_config(const int obj_idx);

@@ -33,6 +33,9 @@ enum ItemType {
     itLayerRoot     = 64,
     itLayer         = 128,
     itInfo          = 256,
+    // ORCA FullSpectrum: Z-Preset Regions
+    itZPresetRoot   = 512,
+    itZPreset       = 1024,
 };
 
 enum ColumnNumber
@@ -76,7 +79,8 @@ class ObjectDataViewModelNode
     wxBitmap                        m_empty_bmp;
     size_t                          m_volumes_cnt = 0;
     std::vector< std::string >      m_opt_categories;
-    t_layer_height_range            m_layer_range = { 0.0f, 0.0f };
+    t_layer_height_range            m_layer_range    = { 0.0f, 0.0f };
+    t_layer_height_range            m_z_preset_range = { 0.0f, 0.0f }; // ORCA FullSpectrum
 
     wxString				        m_name;
     wxBitmap&                       m_bmp = m_empty_bmp;
@@ -379,6 +383,16 @@ public:
     wxDataViewItem AddInstanceChild(const wxDataViewItem &parent_item, size_t num);
     wxDataViewItem AddInstanceChild(const wxDataViewItem &parent_item, const std::vector<bool>& print_indicator, const std::vector<int>& plate_indicator);
     wxDataViewItem AddLayersRoot(const wxDataViewItem &parent_item);
+    // ORCA FullSpectrum: Z-Preset Region tree nodes
+    wxDataViewItem AddZPresetRoot(const wxDataViewItem &parent_item);
+    wxDataViewItem AddZPresetChild(const wxDataViewItem &parent_item,
+                                   const t_layer_height_range& range,
+                                   const std::string& preset_name,
+                                   const int index = -1);
+    wxDataViewItem GetZPresetRootItem(const wxDataViewItem &parent_item) const;
+    t_layer_height_range GetZPresetRangeByItem(const wxDataViewItem &item) const;
+    wxDataViewItem GetItemByZPresetRange(const int obj_idx, const t_layer_height_range& range) const;
+    void           UpdateZPresetChild(const wxDataViewItem &item, const std::string& preset_name);
     wxDataViewItem AddLayersChild(  const wxDataViewItem &parent_item,
                                     const t_layer_height_range& layer_range,
                                     const int extruder = 0,
