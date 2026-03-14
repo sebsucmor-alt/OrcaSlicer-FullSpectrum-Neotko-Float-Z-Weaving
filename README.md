@@ -983,3 +983,7 @@ Once label persistence is fixed, display label text instead.
 ### KNOWN: Z-band canvas highlight disappears on scene reload
 `reload_scene()` clears some GLCanvas state. The ZBandHighlight may need to be
 re-applied after reload. Tracked from session 13.
+
+IMPORTANT
+
+Much of the to-do and bugs have been fixed, check read implementation_plan.md and task.md for the full info. Used Antigravity to help with bug fixes and almost all to-do is Done
